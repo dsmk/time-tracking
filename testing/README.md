@@ -3,9 +3,9 @@
 A throwaway OpenTodo instance in a container, sample data, and the opt-in tests
 that run `tt` against it.
 
-Nothing here runs in ordinary CI. `cargo test` never touches a server — the
-live tests are `#[ignore]`d and a CI step asserts they stayed that way. This
-directory is how you close the **UNVERIFIED** items in
+Nothing here runs in ordinary CI. `go test ./...` never touches a server — the
+live tests sit behind the `live` build tag, and a CI step asserts they stayed
+there. This directory is how you close the **UNVERIFIED** items in
 [`../docs/opentodo-compatibility.md`](../docs/opentodo-compatibility.md) §11.
 
 > **One step is manual.** OpenTodo creates its owner account through the web
@@ -27,7 +27,7 @@ directory is how you close the **UNVERIFIED** items in
 | `.env.example` | Port, base URL and image tag |
 | `seed.sh` | Creates sample tasks and time entries with documented `ot` commands, and writes `.live-env` |
 | `reset.sh` | Removes what `seed.sh` created |
-| `run-live-tests.sh` | Runs the opt-in tests in `../tests/live.rs` |
+| `run-live-tests.sh` | Runs the opt-in tests in `../internal/integration/live_test.go` |
 | `capture-findings.sh` | Dumps what a real `ot` prints, for updating the compatibility doc |
 | `seed/sample-tasks.json` | The same tasks in OpenTodo's documented `json-generic` import format |
 
@@ -111,7 +111,7 @@ two entries so the per-task grouping has something to merge.
 No entry crosses midnight — OpenTodo rejects an end time before the start, and
 `ot time log --from/--to` are times on a single day, so a midnight-crossing
 entry cannot be created through a documented interface. The split-across-days
-arithmetic is covered by the unit tests in `src/report.rs` instead.
+arithmetic is covered by the unit tests in `../internal/report/` instead.
 
 `seed.sh` refuses to run if that week already has entries, since the live tests
 assert exact totals. It writes `.live-env` with the ids, dates and expected
@@ -131,7 +131,7 @@ tests need.
 ./run-live-tests.sh
 ```
 
-Nine tests in [`../tests/live.rs`](../tests/live.rs), run single-threaded
+Nine tests in [`../internal/integration/live_test.go`](../internal/integration/live_test.go), run one at a time
 because OpenTodo allows one running timer per account:
 
 - real `ot time list --json` parses into entries tt can report on

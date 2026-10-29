@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 #
 # Build the images in Containerfile. Run from anywhere; the build context is
-# always the repository root, because the Rust build needs the source.
+# always the repository root, because the build needs tt's source.
 #
 #   ./build.sh                 # both
 #   ./build.sh toolbox
 #   ./build.sh test
-#   ./build.sh toolbox --build-arg TOOLBOX_EXTRA_PACKAGES=""   # no rustc
+#   ./build.sh toolbox --build-arg TOOLBOX_EXTRA_PACKAGES=""   # no Go toolchain
 #
 # Environment:
 #   ENGINE        podman (default) or docker

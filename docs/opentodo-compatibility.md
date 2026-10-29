@@ -290,7 +290,7 @@ after which the child is killed; termination by signal reported as such;
 
 Before `SPEC.md` §12 can be signed off, stand up a test instance
 (`testing/README.md`), run `testing/capture-findings.sh` and the opt-in tests in
-`tests/live.rs`, walk the manual steps in `docs/live-check.md`, and update this
+the live tests, walk the manual steps in `docs/live-check.md`, and update this
 file with the results:
 
 1. The real shape of `ot time list --json` — bare array vs `{entries,…}`
@@ -321,5 +321,6 @@ podman run --rm --network=none tt-test:latest shell ot schema > schema.json
 `testing/capture-findings.sh` does that and the rest in one go, and the manual
 `Live OpenTodo checks` workflow captures the schema as a CI artifact.
 
-Items 1, 2, 5, 6 and 7 are also asserted by `tests/live.rs`, so once a seeded
+Items 1, 2, 5, 6 and 7 are also asserted by
+`internal/integration/live_test.go`, so once a seeded
 instance exists they are checked rather than eyeballed.

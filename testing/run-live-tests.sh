@@ -2,9 +2,10 @@
 #
 # Run the opt-in live tests against the seeded test server.
 #
-# They are #[ignore]d, so `cargo test` never runs them by accident; this script
-# is the deliberate way in. They run single-threaded because OpenTodo allows
-# only one running timer per account, which is shared state.
+# They sit behind the `live` build tag, so `go test ./...` does not even
+# compile them; this script is the deliberate way in. They run one at a time
+# because OpenTodo allows only one running timer per account, which is shared
+# state.
 
 set -euo pipefail
 
@@ -27,5 +28,6 @@ echo "  week:     $TT_LIVE_WEEK_FROM .. $TT_LIVE_WEEK_TO"
 echo "  timezone: $TT_LIVE_TZ"
 echo
 
-exec cargo test --manifest-path "$root/Cargo.toml" --test live -- \
-  --ignored --test-threads=1 "$@"
+cd "$root"
+exec go test -tags live -count=1 -v -timeout 10m \
+  ./internal/integration -run 'TestLive' "$@"

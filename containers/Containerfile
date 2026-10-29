@@ -3,7 +3,7 @@
 #   --target toolbox   an interactive Toolbox/Distrobox for running tt and ot
 #   --target test      a non-interactive image for scripted integration tests
 #
-# Build from the repository root, because the Rust build needs the source:
+# Build from the repository root, because the build needs tt's source:
 #
 #   podman build -f containers/Containerfile --target toolbox -t tt-toolbox .
 #
@@ -11,23 +11,25 @@
 
 ARG FEDORA_VERSION=44
 ARG GO_VERSION=1.26
-ARG RUST_VERSION=1.88
 
 # ---------------------------------------------------------------------------
-# ot — the OpenTodo CLI that tt drives
+# build — ot and tt, from one Go toolchain
 # ---------------------------------------------------------------------------
 #
-# NOTE the module path. Upstream's documented command is
-# `go install github.com/pixari/opentodo/cmd/ot@latest`, and that is what the
-# rest of this repository still says, but the project's go.mod now declares
-# `github.com/OpenTodoApp/opentodo`. Go refuses a module whose declared path
-# differs from the one it was asked for, so the documented command fails and
-# this one is used instead.
-FROM docker.io/library/golang:${GO_VERSION} AS ot
+# Both are Go programs, so one stage produces both binaries and the module
+# cache is shared between them.
+#
+# NOTE the module path for ot. Upstream's documented command is
+# `go install github.com/pixari/opentodo/cmd/ot@latest`, but the project's
+# go.mod now declares `github.com/OpenTodoApp/opentodo`. Go refuses a module
+# whose declared path differs from the one it was asked for, so the documented
+# command fails and this one is used instead.
+FROM docker.io/library/golang:${GO_VERSION} AS build
 ARG OT_VERSION=v0.16.0
+ARG TT_VERSION=v0.1.0
 ENV CGO_ENABLED=0
 
-# The version has to be stamped in, not just installed. cmd/ot/main.go
+# The ot version has to be stamped in, not just installed. cmd/ot/main.go
 # declares `var version = "dev"` and upstream's Makefile overrides it with
 # `-X main.version=`; a plain `go install` leaves it at "dev", `ot version
 # --json` then reports {"version":"dev"}, and tt cannot parse that as a
@@ -37,18 +39,15 @@ RUN go install -trimpath -ldflags="-s -w -X main.version=${OT_VERSION}" \
       "github.com/OpenTodoApp/opentodo/cmd/ot@${OT_VERSION}" \
     && /go/bin/ot version --json
 
-# ---------------------------------------------------------------------------
-# tt — this repository
-# ---------------------------------------------------------------------------
-FROM docker.io/library/rust:${RUST_VERSION} AS tt
 WORKDIR /src
-# Cargo.lock is committed, so --locked gives the same dependency versions CI
-# builds with.
-COPY Cargo.toml Cargo.lock ./
-COPY src ./src
-COPY tests ./tests
-RUN cargo build --release --locked \
-    && strip target/release/tt
+# go.sum is committed, so the module graph is the one CI builds with.
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd ./cmd
+COPY internal ./internal
+RUN go build -trimpath -ldflags="-s -w -X main.version=${TT_VERSION}" \
+      -o /go/bin/tt ./cmd/tt \
+    && /go/bin/tt --version
 
 # ---------------------------------------------------------------------------
 # toolbox — interactive
@@ -71,36 +70,41 @@ LABEL com.github.containers.toolbox="true" \
 # jq and GNU date are what testing/*.sh need; the rest of what those scripts
 # use is already in the base image.
 #
-# rust and cargo are here so the toolbox can rebuild tt, which is most of the
-# point of having one. Build with --build-arg TOOLBOX_EXTRA_PACKAGES="" to
-# leave them out and save about 500 MB. Note that Fedora's rustc is whatever
-# that release ships (1.99 on f44), not the 1.88 pinned above.
-ARG TOOLBOX_EXTRA_PACKAGES="rust cargo"
+# golang is here so the toolbox can rebuild tt, which is most of the point of
+# having one. Build with --build-arg TOOLBOX_EXTRA_PACKAGES="" to leave it out
+# and save about 600 MB. Note that Fedora's Go is whatever that release ships,
+# not the version pinned above.
+ARG TOOLBOX_EXTRA_PACKAGES="golang"
 RUN dnf -y install jq ${TOOLBOX_EXTRA_PACKAGES} \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
-COPY --from=ot /go/bin/ot /usr/local/bin/ot
-COPY --from=tt /src/target/release/tt /usr/local/bin/tt
+COPY --from=build /go/bin/ot /usr/local/bin/ot
+COPY --from=build /go/bin/tt /usr/local/bin/tt
 
 # ---------------------------------------------------------------------------
 # test — scripted integration tests
 # ---------------------------------------------------------------------------
 #
 # The repository is mounted at /work rather than copied in, so a run tests the
-# working tree. CARGO_TARGET_DIR points outside it so a container build never
-# fights the host's ./target.
-FROM docker.io/library/rust:${RUST_VERSION} AS test
+# working tree. The build and module caches live outside it so a container run
+# never fights the host's own caches.
+FROM docker.io/library/golang:${GO_VERSION} AS test
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends jq ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=ot /go/bin/ot /usr/local/bin/ot
+COPY --from=build /go/bin/ot /usr/local/bin/ot
 
-ENV CARGO_TARGET_DIR=/cargo-target \
-    CARGO_HOME=/cargo-home
-RUN mkdir -p /cargo-target /cargo-home && chmod 0777 /cargo-target /cargo-home
+# HOME is set away from /work because the container runs as the invoking user
+# (--userns=keep-id), whose home does not exist inside the image: without this,
+# the Go toolchain writes its telemetry counters into the mounted working tree.
+ENV GOCACHE=/go-cache \
+    GOMODCACHE=/go-mod \
+    GOFLAGS=-mod=mod \
+    HOME=/go-home
+RUN mkdir -p /go-cache /go-mod /go-home && chmod 0777 /go-cache /go-mod /go-home
 
 WORKDIR /work
 COPY containers/test-entrypoint.sh /usr/local/bin/test-entrypoint

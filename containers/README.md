@@ -5,8 +5,8 @@ and of the `ot` client it drives.
 
 | Target | What it is for |
 |---|---|
-| `toolbox` | An interactive [Toolbox](https://containertoolbx.org/)/[Distrobox](https://distrobox.it/) with `tt` and `ot` on `PATH` — a place to use the CLI without installing a Rust or Go toolchain on the host |
-| `test` | A non-interactive image that runs `cargo test`, and the opt-in live tests in [`../testing/`](../testing/), against a mounted working tree |
+| `toolbox` | An interactive [Toolbox](https://containertoolbx.org/)/[Distrobox](https://distrobox.it/) with `tt` and `ot` on `PATH` — a place to use the CLI without installing a Go toolchain on the host |
+| `test` | A non-interactive image that runs `go test ./...`, and the opt-in live tests in [`../testing/`](../testing/), against a mounted working tree |
 
 ```bash
 cd containers
@@ -14,8 +14,10 @@ cd containers
 ./build.sh toolbox      # or just one
 ```
 
-The build context is the repository root — the Rust build needs the source —
-and `build.sh` handles that wherever you run it from.
+The build context is the repository root — the build needs `tt`'s source —
+and `build.sh` handles that wherever you run it from. `tt` and `ot` are both
+Go programs, so one builder stage produces both and shares a module cache
+between them.
 
 ## The toolbox
 
@@ -44,28 +46,28 @@ Two things both tools do that matter here:
   `testing/docker-compose.yml` on `:8080`, say — is reachable at the same URL
   you would use outside.
 
-The image carries `rust` and `cargo` so you can rebuild `tt` inside it, which
-is most of the point of a toolbox. That adds about 500 MB; leave it out
-with:
+The image carries `golang` so you can rebuild `tt` inside it, which is most of
+the point of a toolbox. That adds about 600 MB; leave it out with:
 
 ```bash
 ./build.sh toolbox --build-arg TOOLBOX_EXTRA_PACKAGES=""
 ```
 
-Note that Fedora's `rustc` is whatever that release ships, not the 1.88 in
-`rust-version`. For a build that matches CI exactly, use the `test` image.
+Note that Fedora's Go is whatever that release ships, not the version pinned
+in the Containerfile. For a build that matches CI exactly, use the `test`
+image.
 
 ## The test image
 
 ```bash
 ./build.sh test
-./run-tests.sh unit            # cargo test; no server, no network
+./run-tests.sh unit            # go test ./...; no server, no network
 ```
 
-That is the suite CI runs, in a pinned toolchain, without installing Rust on
-the host. The repository is *mounted*, not copied, so it tests your working
-tree; `CARGO_TARGET_DIR` points at a volume so a container run never fights
-the host's `./target`.
+That is the suite CI runs, in a pinned toolchain, without installing Go on the
+host. The repository is *mounted*, not copied, so it tests your working tree;
+`GOCACHE` and `GOMODCACHE` point at volumes so a container run never fights
+the host's own caches.
 
 For the live tests you need a throwaway server and a token:
 
@@ -73,7 +75,7 @@ For the live tests you need a throwaway server and a token:
 export OPENTODO_URL=https://todo.kind.test
 export OPENTODO_TOKEN=...        # ../deploy/bin/ot-credentials.sh --help
 ./run-tests.sh seed              # sample tasks and 3h45m of known time
-./run-tests.sh live              # the nine opt-in tests in ../tests/live.rs
+./run-tests.sh live              # the nine opt-in tests behind the `live` tag
 ./run-tests.sh reset
 ```
 
@@ -114,15 +116,15 @@ ldflag, and reports `v0.16.0`.
 
 ## What has been checked
 
-Both images were built and run on podman 5.8.9 / Fedora 44.
+Both images were built and run on podman 5.8.9 / Fedora 44, after the port to Go.
 
 | | |
 |---|---|
 | Scripts | `bash -n` clean, and wired into the CI shell-parse step |
 | `ot` | Built and run. `ot version --json` returns `{"output_version":1,"version":"v0.16.0"}` — `output_version` 1 is what `tt` supports, and the leading `v` is stripped by `tt`'s semver parser. |
 | The old module path | Confirmed broken by building it: Go reports the path conflict quoted above. |
-| `toolbox` | `tt`, `ot`, `jq` and `cargo` all on `PATH`. `tt 0.1.0` runs and drives the real `ot` — the first time anything in this repository has done so against a genuine client rather than the mock. |
-| `test` | `./run-tests.sh unit` passes: 117 tests, 9 live tests still `#[ignore]`d, the same numbers as a host `cargo test`. Build artefacts landed in the volume, the host's `./target` was untouched, and `--userns=keep-id` left the working tree owned by the invoking user. |
+| `toolbox` | `tt`, `ot`, `jq` and `go` all on `PATH`. `tt v0.1.0` and `ot v0.16.0` both run; `tt` drives the real `ot` rather than the mock. |
+| `test` | `./run-tests.sh unit` passes: 150 tests, the same number as a host `go test ./...`, with the 9 live tests still behind their build tag. The Go build and module caches landed in the volumes, the host's caches were untouched, and `--userns=keep-id` left the working tree owned by the invoking user. |
 | **A live run against a server** | **Not done.** No image has been pointed at an OpenTodo instance, so `./run-tests.sh live`, `seed` and `findings` are unexercised. |
 
 If upstream renames the module again, or tags a release without `cmd/ot`, the

@@ -8,16 +8,13 @@ on:
     inputs:
       run_live_tests:
         description: >-
-          Run tests/live.rs against the instance in the OPENTODO_URL and
-          OPENTODO_TOKEN secrets. Requires a seeded instance.
+          Run the `live`-tagged tests against the instance in the
+          OPENTODO_URL and OPENTODO_TOKEN secrets. Requires a seeded instance.
         type: boolean
         default: false
 
 permissions:
   contents: read
-
-env:
-  CARGO_TERM_COLOR: always
 
 jobs:
   # Starts the real image and checks it serves. Needs no account, so this one
@@ -87,7 +84,7 @@ jobs:
           if-no-files-found: error
 
   live-tests:
-    name: tests/live.rs
+    name: Live tests
     if: inputs.run_live_tests
     runs-on: ubuntu-latest
     steps:
@@ -107,13 +104,11 @@ jobs:
             echo "ready=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: dtolnay/rust-toolchain@stable
-        if: steps.check.outputs.ready == 'true'
-
       - uses: actions/setup-go@v5
         if: steps.check.outputs.ready == 'true'
         with:
           go-version: stable
+          cache-dependency-path: go.sum
 
       - name: Install the OpenTodo CLI
         if: steps.check.outputs.ready == 'true'

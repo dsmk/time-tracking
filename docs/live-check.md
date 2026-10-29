@@ -43,7 +43,7 @@ Record:
 - [ ] Which key in `version --json` holds the client version (open item 3).
 
 If `time list` turns out to paginate, `tt` must follow the cursor instead of
-warning about it: see `App::fetch` in `src/commands/mod.rs`.
+warning about it: see `App.Fetch` in `internal/commands/app.go`.
 
 ## 2. Round trip through the web interface
 

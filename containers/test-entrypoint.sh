@@ -3,8 +3,8 @@
 # Entry point for the `test` image. Runs tt's test suites against a mounted
 # copy of the repository, optionally talking to a real OpenTodo server.
 #
-#   unit       cargo test — no server, no network, the suite CI runs
-#   live       the opt-in tests in tests/live.rs, against $OPENTODO_URL
+#   unit       go test ./... — no server, no network, the suite CI runs
+#   live       the opt-in tests behind the `live` build tag, against $OPENTODO_URL
 #   seed       testing/seed.sh, to create the sample data live needs
 #   findings   testing/capture-findings.sh, read-only
 #   all        unit, then live when a server is configured
@@ -54,9 +54,9 @@ EOF
 
 case "$cmd" in
   unit)
-    # Mirrors the CI job: every live test must still be #[ignore]d, so this
-    # never reaches a server even if one is configured.
-    exec cargo test --locked "$@"
+    # Mirrors the CI job. The live tests sit behind the `live` build tag, so
+    # this never reaches a server even if one is configured.
+    exec go test ./... "$@"
     ;;
 
   live)
@@ -80,8 +80,8 @@ case "$cmd" in
     ;;
 
   all)
-    echo "=== cargo test ===" >&2
-    cargo test --locked
+    echo "=== go test ./... ===" >&2
+    go test ./...
     if have_server; then
       echo >&2
       echo "=== live tests ===" >&2

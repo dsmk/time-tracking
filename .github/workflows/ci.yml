@@ -13,9 +13,6 @@ concurrency:
 permissions:
   contents: read
 
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
   test:
     name: Test
@@ -23,28 +20,36 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache-dependency-path: go.sum
 
       - name: Build
-        run: cargo build --locked --all-targets
+        run: go build ./...
 
       - name: Test
-        run: cargo test --locked
+        run: go test ./...
 
       # The suite must never reach a real OpenTodo server (SPEC.md §11). The
-      # live tests are #[ignore]d; this proves they still are, so a dropped
-      # attribute fails here instead of in someone's account.
+      # live tests sit behind the `live` build tag; this proves they are still
+      # excluded from the ordinary run *and* that they still compile, so a
+      # dropped tag or a rotted test fails here instead of in someone's
+      # account.
       - name: Live tests must stay opt-in
         run: |
-          output=$(cargo test --locked --test live 2>&1)
-          echo "$output"
-          if ! echo "$output" | grep -qE '0 passed; 0 failed; [1-9][0-9]* ignored'; then
-            echo "::error::tests/live.rs ran against a server, or has no ignored tests."
-            echo "::error::Every live test must carry #[ignore]."
+          if go test ./... -list '.*' | grep -q '^TestLive'; then
+            echo "::error::A live test is in the ordinary suite."
+            echo "::error::Every test in internal/integration/live_test.go needs the live build tag."
             exit 1
           fi
+          found=$(go test -tags live ./internal/integration -list '.*' | grep -c '^TestLive')
+          echo "live tests behind the build tag: $found"
+          if [ "$found" -eq 0 ]; then
+            echo "::error::No live tests were found behind the build tag."
+            exit 1
+          fi
+          go vet -tags live ./...
 
       - name: Shell scripts parse
         run: |
@@ -70,73 +75,91 @@ jobs:
           cd deploy/quadlet
           ansible-playbook site.yml --syntax-check -e vault_file=vault.example.yml
 
-  msrv:
-    name: Minimum supported Rust (1.88)
+  minimum-go:
+    name: Minimum supported Go (1.24)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      # Matches `rust-version` in Cargo.toml. 1.88 is the first release with
-      # let chains in edition 2024, which src/ot/model.rs and src/main.rs use.
-      - uses: dtolnay/rust-toolchain@1.88.0
-
-      - uses: Swatinem/rust-cache@v2
+      # Matches the `go` directive in go.mod. A newer toolchain would silently
+      # satisfy a newer language feature, so this job pins the floor.
+      - uses: actions/setup-go@v5
         with:
-          key: msrv
+          go-version: "1.24"
+          cache-dependency-path: go.sum
 
-      - run: cargo check --locked --all-targets
+      - name: Build and vet
+        env:
+          # Refuse to download a newer toolchain: the point is to compile with
+          # this one.
+          GOTOOLCHAIN: local
+        run: |
+          go build ./...
+          go vet ./...
 
   lint:
-    name: Format and clippy (advisory)
+    name: Format and vet
     runs-on: ubuntu-latest
-    # Advisory for now: this code has not been through rustfmt or clippy yet,
-    # so a first green run is needed before these can block a merge. Once this
-    # job passes cleanly, delete this line to make it required.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v5
         with:
-          components: rustfmt, clippy
+          go-version: stable
+          cache-dependency-path: go.sum
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: lint
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt would change: $unformatted"
+            exit 1
+          fi
 
-      - name: rustfmt
-        run: cargo fmt --all --check
+      - name: go vet
+        run: go vet ./...
 
-      - name: clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: go.mod is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      - name: staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@2025.1.1
+          "$(go env GOPATH)/bin/staticcheck" ./...
 
   release:
     name: Release build
     # Only after the checks that can block: a release artifact is never built
     # from code that failed its tests.
-    needs: [test, msrv]
+    needs: [test, minimum-go, lint]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-go@v5
         with:
-          key: release
+          go-version: stable
+          cache-dependency-path: go.sum
 
       - name: Build
-        run: cargo build --locked --release
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          go build -trimpath \
+            -ldflags="-s -w -X main.version=$(git describe --tags --always --dirty)" \
+            -o dist/tt ./cmd/tt
 
       - name: Smoke-test the binary
         run: |
-          ./target/release/tt --version
-          ./target/release/tt --help > /dev/null
+          ./dist/tt --version
+          ./dist/tt --help > /dev/null
           # With no OpenTodo client present, tt must fail cleanly with exit 7
           # rather than panicking or claiming success.
           set +e
-          ./target/release/tt --ot-command /nonexistent/ot status
+          ./dist/tt --ot-command /nonexistent/ot status
           code=$?
           set -e
           if [ "$code" -ne 7 ]; then
@@ -147,6 +170,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: tt-linux-x86_64
-          path: target/release/tt
+          path: dist/tt
           if-no-files-found: error
           retention-days: 30

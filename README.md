@@ -1,6 +1,6 @@
 # tt — terminal time tracking for OpenTodo
 
-`tt` is a small Rust CLI that makes [OpenTodo](https://open-todo.app) time
+`tt` is a small Go CLI that makes [OpenTodo](https://open-todo.app) time
 tracking fast from a terminal. It starts and stops timers, lists entries, and
 produces weekly and date-range reports.
 
@@ -24,7 +24,7 @@ Built against `SPEC.md`. What `ot` is documented to do, and what that means for
 
 ## Requirements
 
-- Rust 1.85 or later (edition 2024)
+- Go 1.24 or later
 - The OpenTodo CLI, version 0.9.0 or later, signed in:
 
   ```bash
@@ -51,8 +51,18 @@ instance selection stay with `ot` (`ot auth status`, `OPENTODO_URL`,
 ## Install
 
 ```bash
-cargo install --path .
+go install github.com/dsmk/time-tracking/cmd/tt@latest
 ```
+
+Or from a checkout:
+
+```bash
+go build -o tt ./cmd/tt
+```
+
+`tt` and `ot` are both Go programs, so one toolchain builds the whole
+toolset — and the IANA timezone database is compiled into the binary, so day
+and week boundaries do not depend on the host having `tzdata` installed.
 
 ## Usage
 
@@ -190,14 +200,15 @@ printing a duration it computed itself.
 ## Development
 
 ```bash
-cargo test          # 117 tests: unit plus integration
-cargo build --release
+go test ./...       # 150 tests: unit plus integration
+go build ./...
 ```
 
-Integration tests run the real `tt` binary against a mock `ot` executable that
-answers only the commands a test installs. Anything else fails with
-`unexpected_command`, so an invented `ot` subcommand breaks the suite. `TT_NOW`
-pins the clock so report periods and elapsed times are deterministic.
+Integration tests in [`internal/integration/`](internal/integration/) build the
+real `tt` binary and run it against a mock `ot` executable that answers only
+the commands a test installs. Anything else fails with `unexpected_command`, so
+an invented `ot` subcommand breaks the suite. `TT_NOW` pins the clock so report
+periods and elapsed times are deterministic.
 
 ### Testing against a real OpenTodo server
 
@@ -213,8 +224,9 @@ export OPENTODO_PROFILE=tt-test
 ./run-live-tests.sh
 ```
 
-Those tests carry `#[ignore]`, so `cargo test` never touches a server, and CI
-asserts they stayed that way. See [`testing/README.md`](testing/README.md).
+Those tests are behind the `live` build tag, so `go test ./...` does not even
+compile them, and CI asserts they stayed there *and* that they still build.
+See [`testing/README.md`](testing/README.md).
 
 ### Deploying the server
 
@@ -236,7 +248,7 @@ through single sign-on.
 
 [`containers/`](containers/) builds two images from one Containerfile: a
 Toolbox/Distrobox with `tt` and `ot` already on `PATH`, and a test image that
-runs `cargo test` and the opt-in live tests against a mounted working tree.
+runs `go test ./...` and the opt-in live tests against a mounted working tree.
 
 ```bash
 cd containers && ./build.sh
@@ -256,13 +268,10 @@ request and on pushes to `main`:
 
 | Job | Blocking | What it does |
 |---|---|---|
-| `test` | yes | Builds, runs all 117 tests, verifies the live tests are still opt-in, parses the shell scripts |
-| `msrv` | yes | `cargo check` on Rust 1.88, the version `rust-version` claims |
-| `lint` | no, for now | `cargo fmt --check` and `cargo clippy -D warnings` |
-| `release` | — | Only on `main`, only after `test` and `msrv` pass: builds the release binary, smoke-tests it, uploads it as an artifact |
-
-`lint` is advisory because this code has not been through rustfmt or clippy
-yet; drop its `continue-on-error` once it is green.
+| `test` | yes | Builds, runs all 150 tests, verifies the live tests are still opt-in and still compile, parses the shell scripts |
+| `minimum-go` | yes | `go build` and `go vet` on Go 1.24, the floor `go.mod` claims, with `GOTOOLCHAIN=local` so it cannot quietly use a newer one |
+| `lint` | yes | `gofmt -l`, `go vet`, `go mod tidy` leaves no diff, and `staticcheck` |
+| `release` | — | Only on `main`, only after the other three pass: builds the release binary, smoke-tests it, uploads it as an artifact |
 
 [`.github/workflows/live.yml`](.github/workflows/live.yml) is manual only
 (Actions → Run workflow). It starts the real OpenTodo image and checks
@@ -271,19 +280,22 @@ document, and — if you point the `OPENTODO_URL` and `OPENTODO_TOKEN` secrets a
 a throwaway instance — runs the live tests.
 
 ```text
-src/
-  main.rs         wiring and exit codes
-  cli.rs          command-line surface
-  config.rs       settings
-  clock.rs        injectable "now"
-  report.rs       periods, timezone clipping, aggregation
-  output.rs       text, JSON and CSV rendering
-  commands/       one module per command group
+cmd/tt/           wiring and exit codes
+internal/
+  cli/            command-line surface
+  commands/       one file per command group
+  config/         settings
+  clock/          injectable "now"
+  civil/          calendar dates, with no time and no zone
+  report/         periods, timezone clipping, aggregation
+  output/         text, JSON and CSV rendering
+  tterr/          the error type that carries tt's exit codes
+  integration/    the real binary against a mock `ot`
   ot/             the OpenTodo adapter — the only code that knows about `ot`
-    mod.rs        operations, argument construction, exit-code mapping
-    model.rs      documented JSON shapes
-    runner.rs     process execution, timeouts, mock runner
-    redact.rs     credential scrubbing for anything `ot` prints
+    ot.go         operations, argument construction, exit-code mapping
+    model.go      documented JSON shapes
+    runner.go     process execution and timeouts
+    redact.go     credential scrubbing for anything `ot` prints
 ```
 
-Nothing outside `src/ot/` knows that `ot` exists.
+Nothing outside `internal/ot/` knows that `ot` exists.

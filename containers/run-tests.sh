@@ -2,7 +2,7 @@
 #
 # Run tt's tests inside the `test` image, against the working tree.
 #
-#   ./run-tests.sh                                   # cargo test only
+#   ./run-tests.sh                                   # go test ./... only
 #   ./run-tests.sh unit
 #   ./run-tests.sh seed                              # needs a server
 #   ./run-tests.sh live                              # needs a server
@@ -23,14 +23,14 @@
 # Environment:
 #   ENGINE        podman (default) or docker
 #   IMAGE         image to run, default tt-test:latest
-#   CARGO_VOLUME  named volume for the Rust build cache, default tt-cargo
+#   GO_VOLUME     named volume prefix for the Go caches, default tt-go
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/.." && pwd)"
 engine="${ENGINE:-podman}"
 image="${IMAGE:-tt-test:latest}"
-cargo_volume="${CARGO_VOLUME:-tt-cargo}"
+go_volume="${GO_VOLUME:-tt-go}"
 
 command -v "$engine" >/dev/null || { echo "$engine is not installed" >&2; exit 1; }
 
@@ -46,10 +46,10 @@ opts=(
   # The working tree, writable: seed.sh writes testing/.live-env and
   # capture-findings.sh writes testing/findings/.
   --volume "$root:/work:z"
-  # Build artefacts and the cargo registry stay in volumes, so a container
-  # run never touches the host's ./target and a second run is fast.
-  --volume "$cargo_volume-target:/cargo-target"
-  --volume "$cargo_volume-home:/cargo-home"
+  # The build and module caches stay in volumes, so a container run never
+  # touches the host's own caches and a second run is fast.
+  --volume "$go_volume-cache:/go-cache"
+  --volume "$go_volume-mod:/go-mod"
 )
 
 # Rootless podman: map the container's user to yours so nothing in the

@@ -1,4 +1,6 @@
-/target
+# Local build output.
+/tt
+/dist
 
 # Written by testing/seed.sh; holds ids from a throwaway instance.
 testing/.live-env
