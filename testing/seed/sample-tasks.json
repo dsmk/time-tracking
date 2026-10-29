@@ -1,0 +1,12 @@
+{
+  "projects": [
+    { "name": "TT Test" },
+    { "name": "TT Admin" }
+  ],
+  "tasks": [
+    { "title": "Design review", "project": "TT Test", "priority": 2 },
+    { "title": "Planning", "project": "TT Test", "priority": 3 },
+    { "title": "Write report", "project": "TT Test", "priority": 3 },
+    { "title": "Inbox triage", "priority": 4 }
+  ]
+}

@@ -1,0 +1,40 @@
+# A throwaway OpenTodo server for exercising `tt` against the real thing.
+#
+# Derived from the documented self-hosting variables at
+# https://open-todo.app/docs/self-hosting/docker/ — it is not a copy of
+# upstream's compose file. Only documented settings appear here.
+#
+#   cd testing && docker compose up -d
+#
+# This is for local testing only: signup stays closed after you create the
+# owner account, and the data volume is meant to be thrown away
+# (`docker compose down -v`).
+
+services:
+  opentodo:
+    # `:stable` moves with every release; pin a version for reproducible runs.
+    image: ghcr.io/pixari/opentodo:${OPENTODO_IMAGE_TAG:-0.13.0}
+    container_name: tt-test-opentodo
+    ports:
+      # The container always listens on 8080; OPENTODO_PORT picks the host port.
+      - "${OPENTODO_PORT:-8080}:8080"
+    environment:
+      # The address you actually reach this instance on. The docs note that an
+      # https value makes cookies Secure, which plain-http localhost cannot
+      # satisfy — so keep this http for local testing.
+      OPENTODO_BASE_URL: ${OPENTODO_BASE_URL:-http://localhost:8080}
+      # Registration stays closed: the first visitor from loopback becomes the
+      # owner, and nobody else can sign up afterwards.
+      OPENTODO_ALLOW_SIGNUP: "false"
+      # No outbound push from a test box.
+      OPENTODO_PUSH: "off"
+      # Keep deletions visible rather than reaped on a timer mid-test.
+      OPENTODO_TRASH_RETENTION_DAYS: "0"
+    volumes:
+      - opentodo-data:/data
+    restart: unless-stopped
+    # The image ships its own HEALTHCHECK (`/opentodo healthcheck`), so none is
+    # declared here. Scripts poll GET /healthz from the host instead.
+
+volumes:
+  opentodo-data:
