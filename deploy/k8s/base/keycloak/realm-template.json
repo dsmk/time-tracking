@@ -1,0 +1,45 @@
+{
+  "realm": "__REALM__",
+  "displayName": "OpenTodo",
+  "enabled": true,
+  "sslRequired": "external",
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "registrationAllowed": false,
+  "resetPasswordAllowed": false,
+  "rememberMe": true,
+  "verifyEmail": false,
+  "bruteForceProtected": true,
+  "permanentLockout": false,
+  "failureFactor": 10,
+  "identityProviders": [__IDENTITY_PROVIDERS__],
+  "users": [__USERS__],
+  "clients": [
+    {
+      "clientId": "__OIDC_CLIENT_ID__",
+      "name": "OpenTodo",
+      "description": "OpenTodo server, confidential OIDC client (authorization code + PKCE).",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "__OIDC_CLIENT_SECRET__",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "frontchannelLogout": false,
+      "redirectUris": [
+        "__OPENTODO_BASE_URL__/api/v1/auth/oidc/callback"
+      ],
+      "webOrigins": [
+        "__OPENTODO_BASE_URL__"
+      ],
+      "attributes": {
+        "post.logout.redirect.uris": "__OPENTODO_BASE_URL__/",
+        "pkce.code.challenge.method": "S256",
+        "client.use.lightweight.access.token.enabled": "false"
+      }
+    }
+  ]
+}

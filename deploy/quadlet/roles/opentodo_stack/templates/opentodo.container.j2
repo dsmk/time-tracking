@@ -1,0 +1,80 @@
+# {{ ansible_managed }}
+#
+# The OpenTodo server. Plain HTTP on 8080; Caddy does the TLS.
+[Unit]
+Description=OpenTodo server
+Requires={{ opentodo_network }}-network.service
+After={{ opentodo_network }}-network.service caddy.service
+
+[Container]
+ContainerName=opentodo
+Image={{ opentodo_image }}
+Network={{ opentodo_network }}.network
+
+# OpenTodo is an OIDC *client*, not just a page in a browser: it fetches the
+# discovery document and exchanges the code for a token itself. So the issuer
+# hostname has to resolve from in here too. Pointing it at Caddy's fixed
+# address on this network keeps that traffic inside podman — no hairpin back
+# through the host's public address, which NAT usually breaks anyway.
+AddHost={{ opentodo_keycloak_host }}:{{ caddy_ip }}
+
+# Must match the address in the browser exactly, or sign-in is refused with
+# "cross-site request rejected".
+Environment=OPENTODO_BASE_URL=https://{{ opentodo_todo_host }}
+Environment=OPENTODO_OIDC_ISSUER={{ opentodo_oidc_issuer }}
+Environment=OPENTODO_OIDC_CLIENT_ID={{ opentodo_oidc_client_id }}
+Environment=OPENTODO_OIDC_DISPLAY_NAME={{ opentodo_oidc_display_name }}
+{% if opentodo_trusted_proxies %}
+Environment=OPENTODO_TRUSTED_PROXIES={{ opentodo_trusted_proxies }}
+{% else %}
+# OPENTODO_TRUSTED_PROXIES is left unset: forwarded headers are trusted from
+# private addresses by default, and {{ opentodo_network_subnet }} is one.
+# Set opentodo_trusted_proxies when something else (Cloudflare, another load
+# balancer) sits in front of Caddy.
+{% endif %}
+{% if opentodo_push %}
+Environment=OPENTODO_PUSH={{ opentodo_push }}
+{% endif %}
+{% if opentodo_tls_mode == 'internal' %}
+
+# Caddy issued its certificates from a CA nothing trusts, and the discovery
+# fetch above runs straight into that. SSL_CERT_FILE *replaces* the Go trust
+# store rather than adding to it, which is only acceptable because this mode
+# is for a host that is not serving the public internet and has push turned
+# off. In `acme` mode none of this is present.
+Environment=SSL_CERT_FILE=/etc/ssl/caddy-ca/root.crt
+Volume={{ opentodo_config_dir }}/caddy-data/caddy/pki/authorities/local:/etc/ssl/caddy-ca:ro,z
+{% endif %}
+
+# Deliberately NOT set here:
+#
+#   OPENTODO_OIDC_SSO_ONLY  - leave unset so the panel toggle stays editable.
+#       Set it to "false" and restart as the break-glass switch when the
+#       provider is down; /?owner=1 always gives the owner a password form.
+#   OPENTODO_ALLOW_SIGNUP   - leave unset (default false). It opens *password*
+#       registration as well as SSO provisioning, and setting it locks the
+#       panel field. Use "Allow new accounts via SSO" in the panel instead.
+Secret={{ secret_prefix }}-oidc-client-secret,type=env,target=OPENTODO_OIDC_CLIENT_SECRET
+Secret={{ secret_prefix }}-setup-token,type=env,target=OPENTODO_SETUP_TOKEN
+
+# The SQLite database, /data/secrets (including oidc.json), the VAPID key and
+# local backups. One writer, so never run a second copy of this container.
+Volume=opentodo-data.volume:/data
+
+ReadOnly=true
+Tmpfs=/tmp
+DropCapability=ALL
+NoNewPrivileges=true
+
+# The image's own healthcheck command.
+HealthCmd=/opentodo healthcheck
+HealthInterval=30s
+HealthRetries=3
+HealthStartPeriod=20s
+
+[Service]
+Restart=on-failure
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,46 @@
+# A local certificate authority for the kind cluster.
+#
+# Cluster-scoped and partly in cert-manager's own namespace, so it is applied
+# separately from the application overlay.
+#
+#   selfsigned ---> kind-root-ca (a real CA certificate) ---> kind-ca
+#
+# Everything the kind-ca ClusterIssuer signs carries this root in the `ca.crt`
+# key of its Secret, which is how the OpenTodo pod comes to trust Keycloak
+# (see overlays/kind/opentodo-ca-trust.yaml) and how bootstrap.sh can hand you
+# a file to import into your browser.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: selfsigned
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: kind-root-ca
+  # A ClusterIssuer of type CA reads its key pair from the cert-manager
+  # namespace, not from the application's.
+  namespace: cert-manager
+spec:
+  isCA: true
+  commonName: opentodo kind local CA
+  secretName: kind-root-ca
+  duration: 8760h    # 1 year
+  renewBefore: 720h  # 30 days
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: selfsigned
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: kind-ca
+spec:
+  ca:
+    secretName: kind-root-ca

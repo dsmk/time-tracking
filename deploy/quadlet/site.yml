@@ -1,0 +1,20 @@
+---
+- name: OpenTodo, Keycloak and Caddy as podman quadlets
+  hosts: opentodo
+  become: true
+
+  vars_files:
+    - "{{ vault_file | default('vault.yml') }}"
+
+  roles:
+    - opentodo_stack
+
+  post_tasks:
+    - name: Summarise
+      ansible.builtin.debug:
+        msg:
+          - "OpenTodo      https://{{ opentodo_todo_host }}"
+          - "Keycloak      {{ opentodo_oidc_issuer }}"
+          - "TLS           {{ opentodo_tls_mode }}"
+          - "GitHub broker {{ 'configured' if (vault_github_client_id | default('')) else 'NOT configured - the realm has no identity provider' }}"
+          - "Next: create the owner account at https://{{ opentodo_todo_host }} using the setup token."

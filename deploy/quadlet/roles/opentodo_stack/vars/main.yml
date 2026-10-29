@@ -1,0 +1,23 @@
+---
+# The podman secrets this role manages, assembled from the vault variables.
+# Kept out of defaults/ so they cannot be half-overridden. `consumers` is
+# documentation: it records which container reads each one.
+opentodo_secrets:
+  - name: "{{ secret_prefix }}-setup-token"
+    value: "{{ vault_opentodo_setup_token }}"
+    consumers: [opentodo]
+  - name: "{{ secret_prefix }}-oidc-client-secret"
+    value: "{{ vault_oidc_client_secret }}"
+    consumers: [opentodo]
+  - name: "{{ secret_prefix }}-keycloak-admin-password"
+    value: "{{ vault_keycloak_admin_password }}"
+    consumers: [keycloak]
+  - name: "{{ secret_prefix }}-postgres-password"
+    value: "{{ vault_postgres_password }}"
+    consumers: [keycloak]
+
+opentodo_containers:
+  - caddy
+  - keycloak-postgres
+  - keycloak
+  - opentodo

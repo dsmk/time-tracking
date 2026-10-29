@@ -1,0 +1,16 @@
+# One ReadWriteOnce volume holding the SQLite database, /data/secrets
+# (including oidc.json), the VAPID key and local backups.
+#
+# The storage must honour fsGroup. "permission denied" or "readonly database"
+# at startup usually means it does not.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: opentodo-data
+  labels:
+    app.kubernetes.io/name: opentodo
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 2Gi

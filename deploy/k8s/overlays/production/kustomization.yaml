@@ -1,0 +1,81 @@
+# Production overlay.
+#
+#   1. edit stack.env            (your two hostnames, in one place)
+#   2. cp secrets.env.example secrets.env and fill it in
+#   3. kubectl apply -f letsencrypt-clusterissuer.yaml   (once per cluster)
+#   4. kubectl apply -k .
+#
+# Assumes ingress-nginx and cert-manager are already installed.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: opentodo
+
+resources:
+  - namespace.yaml
+  - ../../base
+  # Uncomment to publish the Keycloak admin console. Edit the source range in
+  # the file first — it ships restricted to a range that matches nothing.
+  # - keycloak-admin-ingress.yaml
+
+configMapGenerator:
+  - name: stack-config
+    envs:
+      - stack.env
+
+secretGenerator:
+  - name: stack-secrets
+    envs:
+      - secrets.env
+
+
+# Hostnames come from stack.env and are copied into the Ingresses here, so
+# there is exactly one place to change them.
+replacements:
+  - source:
+      kind: ConfigMap
+      name: stack-config
+      fieldPath: data.INGRESS_HOST_OPENTODO
+    targets:
+      - select:
+          kind: Ingress
+          name: opentodo
+        fieldPaths:
+          - spec.rules.0.host
+          - spec.tls.0.hosts.0
+  - source:
+      kind: ConfigMap
+      name: stack-config
+      fieldPath: data.INGRESS_HOST_KEYCLOAK
+    targets:
+      - select:
+          kind: Ingress
+          name: keycloak
+        fieldPaths:
+          - spec.rules.0.host
+          - spec.tls.0.hosts.0
+
+patches:
+  # Ask cert-manager for the certificates named in each Ingress's tls block.
+  - target:
+      kind: Ingress
+      name: opentodo|keycloak
+    patch: |-
+      - op: add
+        path: /metadata/annotations/cert-manager.io~1cluster-issuer
+        value: letsencrypt
+  # Storage. The defaults in base are deliberately small.
+  - target:
+      kind: PersistentVolumeClaim
+      name: opentodo-data
+    patch: |-
+      - op: replace
+        path: /spec/resources/requests/storage
+        value: 10Gi
+  - target:
+      kind: StatefulSet
+      name: keycloak-postgres
+    patch: |-
+      - op: replace
+        path: /spec/volumeClaimTemplates/0/spec/resources/requests/storage
+        value: 10Gi

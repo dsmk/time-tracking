@@ -1,0 +1,274 @@
+---
+# Everything here is idempotent and safe to re-run. The one thing re-running
+# cannot do is change an existing Keycloak realm — see the README.
+
+# --- checks ---------------------------------------------------------------
+
+- name: Check the secrets are set
+  ansible.builtin.assert:
+    that:
+      - vault_opentodo_setup_token | default('') | length >= 16
+      - vault_oidc_client_secret | default('') | length > 0
+      - vault_keycloak_admin_password | default('') | length > 0
+      - vault_postgres_password | default('') | length > 0
+    fail_msg: >-
+      Vault variables are missing or too short. Copy vault.example.yml to
+      vault.yml, fill it in, and encrypt it with `just vault-encrypt`.
+      OPENTODO_SETUP_TOKEN must be at least 16 characters.
+    quiet: true
+
+- name: Check the hostnames were changed from the examples
+  ansible.builtin.assert:
+    that:
+      - opentodo_todo_host != 'todo.example.com'
+      - opentodo_keycloak_host != 'keycloak.example.com'
+    fail_msg: >-
+      Set opentodo_todo_host and opentodo_keycloak_host in group_vars. With
+      TLS mode `acme` they must resolve publicly to this host.
+    quiet: true
+  when: opentodo_tls_mode == 'acme'
+
+- name: Check the admin console allow-list was set
+  ansible.builtin.assert:
+    that: "'192.0.2.0/24' not in keycloak_admin_allow_ranges"
+    fail_msg: >-
+      keycloak_expose_admin is on but keycloak_admin_allow_ranges still holds
+      192.0.2.0/24, the TEST-NET-1 placeholder. That matches no real traffic,
+      so the console would answer 403 to everyone. Set your own ranges.
+    quiet: true
+  when: keycloak_expose_admin | bool
+
+- name: Check the TLS mode is one we know
+  ansible.builtin.assert:
+    that: opentodo_tls_mode in ['acme', 'internal']
+    fail_msg: "opentodo_tls_mode must be 'acme' or 'internal'"
+    quiet: true
+
+# --- host ------------------------------------------------------------------
+
+- name: Install podman
+  ansible.builtin.package:
+    name: podman
+    state: present
+
+- name: Check quadlet is available
+  ansible.builtin.stat:
+    path: /usr/libexec/podman/quadlet
+  register: quadlet_binary
+
+- name: Fail when podman is too old for quadlet
+  ansible.builtin.fail:
+    msg: >-
+      /usr/libexec/podman/quadlet is missing, so this podman has no quadlet
+      generator. Quadlet arrived in podman 4.4, and Notify=healthy (which
+      keycloak-postgres uses) needs 5.0 or later.
+  when: not quadlet_binary.stat.exists
+
+- name: Create the configuration directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    # 0700 throughout: the realm import file and Caddy's private keys live
+    # under here. Nothing but root (and the containers that bind-mount
+    # individual paths) can reach them.
+    mode: "0700"
+  loop:
+    - "{{ opentodo_config_dir }}"
+    - "{{ opentodo_config_dir }}/keycloak"
+    - "{{ opentodo_config_dir }}/keycloak/import"
+    - "{{ opentodo_config_dir }}/caddy-data"
+
+# --- secrets ---------------------------------------------------------------
+
+- name: Read the podman secrets that already exist
+  ansible.builtin.command:
+    argv: [podman, secret, inspect, --showsecret, "{{ item.name }}"]
+  loop: "{{ opentodo_secrets }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: existing_secrets
+  failed_when: false
+  changed_when: false
+  no_log: true
+
+- name: Create or replace the podman secrets
+  # The value goes in through the environment and stdin, never on a command
+  # line where `ps` would show it.
+  ansible.builtin.shell:
+    cmd: printf '%s' "$SECRET_VALUE" | podman secret create --replace {{ item.item.name | quote }} -
+  environment:
+    SECRET_VALUE: "{{ item.item.value }}"
+  loop: "{{ existing_secrets.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  when: >-
+    item.rc != 0
+    or (item.stdout | from_json | first).SecretData != item.item.value
+  changed_when: true
+  no_log: true
+  # Both consumers restart on any change here. Which secret feeds which
+  # container is in vars/main.yml, but sorting that out at runtime buys
+  # nothing: a secret only changes when you deliberately rotate one.
+  #
+  # Rotating the PostgreSQL password is the exception — the container picks
+  # up the new value but the database still wants the old one, so do an
+  # ALTER ROLE as well. The README says so.
+  notify:
+    - opentodo changed
+    - keycloak changed
+
+# --- Keycloak realm --------------------------------------------------------
+#
+# Rendered by the same script and template the Kubernetes deployment uses
+# ({{ opentodo_realm_src }}), so the realm cannot drift between the two.
+
+- name: Install the realm template and its renderer
+  ansible.builtin.copy:
+    src: "{{ opentodo_realm_src }}/{{ item }}"
+    dest: "{{ opentodo_config_dir }}/keycloak/{{ item }}"
+    owner: root
+    group: root
+    mode: "0600"
+  loop:
+    - realm-template.json
+    - render-realm.sh
+
+- name: Render the Keycloak realm
+  ansible.builtin.command:
+    argv: [bash, "{{ opentodo_config_dir }}/keycloak/render-realm.sh"]
+  environment:
+    TEMPLATE: "{{ opentodo_config_dir }}/keycloak/realm-template.json"
+    OUT_DIR: "{{ opentodo_config_dir }}/keycloak/import"
+    # 0644 so the Keycloak container's own user can read the bind-mounted
+    # file. The 0700 directory above is what keeps it from everyone else.
+    OUT_MODE: "0644"
+    REALM: "{{ opentodo_realm }}"
+    OIDC_CLIENT_ID: "{{ opentodo_oidc_client_id }}"
+    OIDC_CLIENT_SECRET: "{{ vault_oidc_client_secret }}"
+    OPENTODO_BASE_URL: "https://{{ opentodo_todo_host }}"
+    GITHUB_CLIENT_ID: "{{ vault_github_client_id | default('') }}"
+    GITHUB_CLIENT_SECRET: "{{ vault_github_client_secret | default('') }}"
+  # Never reported as changed, and it notifies nothing: `--import-realm`
+  # creates a realm that does not exist and never updates one, so re-rendering
+  # this file has no effect on a host that has already started Keycloak once.
+  # The README says what to do instead.
+  changed_when: false
+  no_log: true
+
+# --- configuration and units ----------------------------------------------
+
+- name: Install the Caddyfile
+  ansible.builtin.template:
+    src: Caddyfile.j2
+    dest: "{{ opentodo_config_dir }}/Caddyfile"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: caddy changed
+
+- name: Install the network unit
+  ansible.builtin.template:
+    src: opentodo.network.j2
+    dest: "{{ opentodo_quadlet_dir }}/{{ opentodo_network }}.network"
+    owner: root
+    group: root
+    mode: "0644"
+  register: network_unit
+
+- name: Install the volume units
+  ansible.builtin.template:
+    src: volume.j2
+    dest: "{{ opentodo_quadlet_dir }}/{{ item.name }}.volume"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ opentodo_volumes }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: volume_units
+
+- name: Install the container units
+  ansible.builtin.template:
+    src: "{{ item }}.container.j2"
+    dest: "{{ opentodo_quadlet_dir }}/{{ item }}.container"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ opentodo_containers }}"
+  register: container_units
+  notify: "{{ item }} changed"
+
+- name: Reload systemd so quadlet regenerates the units
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: network_unit is changed or volume_units is changed or container_units is changed
+
+# --- images ----------------------------------------------------------------
+#
+# Pulled up front so a bad tag or an unreachable registry fails here, with a
+# clear message, instead of as a systemd start timeout.
+
+- name: Pull the images
+  tags: pull
+  ansible.builtin.command:
+    argv: [podman, pull, "{{ item }}"]
+  loop:
+    - "{{ caddy_image }}"
+    - "{{ postgres_image }}"
+    - "{{ keycloak_image }}"
+    - "{{ opentodo_image }}"
+  register: pulled
+  changed_when: "'Storing signatures' in pulled.stdout or 'Copying blob' in pulled.stdout"
+
+# --- start -----------------------------------------------------------------
+#
+# Caddy first: in `internal` mode it has to mint the CA before OpenTodo can
+# start with SSL_CERT_FILE pointing into it.
+
+- name: Start Caddy
+  ansible.builtin.systemd_service:
+    name: caddy.service
+    state: started
+    enabled: true
+
+- name: Wait for Caddy's internal CA
+  ansible.builtin.wait_for:
+    path: "{{ opentodo_config_dir }}/caddy-data/caddy/pki/authorities/local/root.crt"
+    timeout: 120
+  when: opentodo_tls_mode == 'internal'
+
+- name: Start the rest of the stack
+  ansible.builtin.systemd_service:
+    name: "{{ item }}.service"
+    state: started
+    enabled: true
+  loop:
+    - keycloak-postgres
+    - keycloak
+    - opentodo
+
+# --- firewall --------------------------------------------------------------
+
+- name: Check whether firewalld is running
+  tags: firewall
+  ansible.builtin.command:
+    argv: [systemctl, is-active, firewalld]
+  register: firewalld_state
+  failed_when: false
+  changed_when: false
+  when: opentodo_manage_firewall | bool
+
+- name: Open http and https
+  tags: firewall
+  ansible.builtin.command:
+    argv: [firewall-cmd, --permanent, --add-service, "{{ item }}"]
+  loop: [http, https]
+  register: firewall_rule
+  changed_when: "'ALREADY_ENABLED' not in firewall_rule.stderr"
+  failed_when: firewall_rule.rc != 0 and 'ALREADY_ENABLED' not in firewall_rule.stderr
+  when:
+    - opentodo_manage_firewall | bool
+    - firewalld_state.stdout | default('') == 'active'
+  notify: reload firewalld

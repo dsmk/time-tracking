@@ -1,0 +1,47 @@
+# TLS is terminated here; OpenTodo itself serves plain HTTP on 8080 and
+# expects exactly that. The annotations below are not decoration — each one
+# corresponds to a documented requirement in
+# https://open-todo.app/docs/self-hosting/docker/ ("Reverse proxy"):
+#
+#   proxy-buffering off   - /api/v1/sync/events is a Server-Sent Events stream
+#                           and must not be buffered. The assistant endpoint
+#                           POST /api/v1/assistant/turn streams too.
+#   read/send-timeout     - the same stream needs a timeout well above 25s.
+#   proxy-body-size       - attachments (OPENTODO_ATTACHMENTS_MAX_FILE_MB,
+#                           default 25) and imports (OPENTODO_IMPORT_MAX_MB,
+#                           default 20) are uploaded through here. Keep this
+#                           above whichever of those is larger.
+#
+# CalDAV, if you enable it, needs PROPFIND/REPORT/MKCALENDAR/PROPPATCH and the
+# Authorization header to pass through. ingress-nginx forwards arbitrary
+# methods and that header already, and the rule below matches /.well-known/
+# because it matches everything.
+#
+# The host is a placeholder; both overlays patch it.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: opentodo
+  labels:
+    app.kubernetes.io/name: opentodo
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-body-size: "32m"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: ["todo.example.com"]
+      secretName: opentodo-tls
+  rules:
+    - host: todo.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: opentodo
+                port:
+                  name: http

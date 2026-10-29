@@ -1,0 +1,31 @@
+# Base for the OpenTodo + Keycloak stack.
+#
+# It is not deployable on its own: the hostnames here are placeholders and the
+# stack-config ConfigMap and stack-secrets Secret come from an overlay. Use
+# overlays/production or overlays/kind.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Selectors are written out in full in each workload, so the shared label is
+# added to metadata only — never to a Deployment's immutable selector.
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: opentodo-stack
+    includeSelectors: false
+
+resources:
+  - opentodo/pvc.yaml
+  - opentodo/deployment.yaml
+  - opentodo/service.yaml
+  - opentodo/ingress.yaml
+  # Drop postgres.yaml and set KC_DB_URL yourself to use a managed database.
+  - keycloak/postgres.yaml
+  - keycloak/deployment.yaml
+  - keycloak/service.yaml
+  - keycloak/ingress.yaml
+
+configMapGenerator:
+  - name: keycloak-realm
+    files:
+      - keycloak/realm-template.json
+      - keycloak/render-realm.sh

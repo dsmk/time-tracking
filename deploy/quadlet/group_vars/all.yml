@@ -1,0 +1,27 @@
+---
+# Non-secret configuration. Secrets go in vault.yml.
+#
+# The full list of what can be set, with defaults and explanations, is in
+# roles/opentodo_stack/defaults/main.yml.
+
+# Both must resolve to this host, and in `acme` mode they must do so
+# publicly, with 80 and 443 reachable from the internet.
+opentodo_todo_host: todo.example.com
+opentodo_keycloak_host: keycloak.example.com
+
+# acme     - Let's Encrypt, for a host on the public internet.
+# internal - Caddy's own CA, for a private network or a trial run. See the
+#            README for what else that changes.
+opentodo_tls_mode: acme
+opentodo_acme_email: admin@example.com
+
+# The label on OpenTodo's sign-in button.
+opentodo_oidc_display_name: GitHub
+
+# The Keycloak admin console is not published by default: the realm comes
+# from the import file, so you do not need it to run the stack. To publish
+# it, set this true and replace the range — 192.0.2.0/24 is TEST-NET-1 and
+# matches nothing.
+keycloak_expose_admin: false
+keycloak_admin_allow_ranges:
+  - 192.0.2.0/24

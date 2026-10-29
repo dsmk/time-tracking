@@ -1,0 +1,159 @@
+# OpenTodo server.
+#
+# The pod shape mirrors what upstream's own Helm chart is documented to do
+# (https://open-todo.app/docs/self-hosting/kubernetes/):
+#
+#   - exactly one replica, because the store is a single SQLite file with one
+#     writer. Do not scale this Deployment.
+#   - strategy Recreate, so the old pod releases the ReadWriteOnce volume
+#     before the new one claims it. Upgrades cost a few seconds of downtime.
+#   - runs as 65532:65532 with fsGroup 65532, read-only root filesystem, an
+#     emptyDir on /tmp, no capabilities, no service account token. That meets
+#     the `restricted` Pod Security Standard.
+#
+# Every OPENTODO_* variable below appears in the upstream configuration table
+# (https://open-todo.app/docs/self-hosting/docker/ and the project README).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opentodo
+  labels:
+    app.kubernetes.io/name: opentodo
+    app.kubernetes.io/component: server
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: opentodo
+      app.kubernetes.io/component: server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: opentodo
+        app.kubernetes.io/component: server
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: opentodo
+          image: ghcr.io/pixari/opentodo:0.16.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            # The public https address. It drives Secure cookies, HSTS, the
+            # origin check, passkeys and every generated link. It must match
+            # the Ingress host exactly or sign-in fails with
+            # "cross-site request rejected".
+            - name: OPENTODO_BASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: stack-config
+                  key: OPENTODO_BASE_URL
+            # Forwarded headers are believed from loopback, private and
+            # link-local addresses by default, which already covers a pod
+            # network. Override it (for example `cloudflare`) when another
+            # proxy sits in front of the ingress controller.
+            - name: OPENTODO_TRUSTED_PROXIES
+              valueFrom:
+                configMapKeyRef:
+                  name: stack-config
+                  key: OPENTODO_TRUSTED_PROXIES
+                  optional: true
+            # --- Single sign-on -------------------------------------------
+            # Setting these as environment variables overrides the matching
+            # fields in Settings -> People -> Single sign-on *and locks them*,
+            # which is what you want for a declaratively managed instance.
+            # The client secret is written to /data/secrets/oidc.json (0600);
+            # backups exclude that directory, so this Secret is the source of
+            # truth after a restore.
+            - name: OPENTODO_OIDC_ISSUER
+              valueFrom:
+                configMapKeyRef:
+                  name: stack-config
+                  key: OPENTODO_OIDC_ISSUER
+            - name: OPENTODO_OIDC_CLIENT_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: stack-config
+                  key: OPENTODO_OIDC_CLIENT_ID
+            - name: OPENTODO_OIDC_DISPLAY_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: stack-config
+                  key: OPENTODO_OIDC_DISPLAY_NAME
+            - name: OPENTODO_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: stack-secrets
+                  key: OIDC_CLIENT_SECRET
+            # Deliberately NOT set here:
+            #
+            #   OPENTODO_OIDC_SSO_ONLY  - leave unset so the panel toggle stays
+            #       editable. Set it to "false" and restart as the break-glass
+            #       switch when the provider is down; `/?owner=1` always gives
+            #       the owner a password form.
+            #   OPENTODO_ALLOW_SIGNUP   - leave unset (default false). It opens
+            #       *password* registration as well as SSO provisioning, and
+            #       setting it locks the panel field. Use
+            #       "Allow new accounts via SSO" in the panel instead.
+            #
+            # The setup token is required because the first visitor arrives
+            # through the ingress, not from loopback. It is ignored once the
+            # owner account exists.
+            - name: OPENTODO_SETUP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: stack-secrets
+                  key: OPENTODO_SETUP_TOKEN
+          envFrom:
+            # Overlay-supplied extras (OPENTODO_PUSH, OPENTODO_LOG_LEVEL,
+            # SSL_CERT_FILE, ...). Optional so base applies on its own.
+            - configMapRef:
+                name: opentodo-extra-env
+                optional: true
+          # `GET /healthz` is the endpoint this repo's own test harness polls
+          # (testing/README.md). The image additionally ships an
+          # `/opentodo healthcheck` command if you prefer an exec probe.
+          startupProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 3
+            failureThreshold: 40
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 30
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: opentodo-data
+        - name: tmp
+          emptyDir: {}

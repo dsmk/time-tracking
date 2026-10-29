@@ -1,0 +1,105 @@
+# kind overlay.
+#
+# Driven by ../../kind/bootstrap.sh, which creates the cluster, installs
+# ingress-nginx and cert-manager, adds the CoreDNS rewrite, writes
+# secrets.env, and then applies this.
+#
+# To apply it by hand instead: cp secrets.env.example secrets.env, edit it,
+# and `kubectl apply -k .` into a cluster that already has those pieces.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: opentodo
+
+resources:
+  - namespace.yaml
+  - ../../base
+  - keycloak-admin-ingress.yaml
+
+configMapGenerator:
+  - name: stack-config
+    envs:
+      - stack.env
+  - name: opentodo-extra-env
+    literals:
+      # No outbound push from a throwaway cluster — and see
+      # opentodo-ca-trust.yaml for why nothing else may talk https either.
+      - OPENTODO_PUSH=off
+      - OPENTODO_LOG_LEVEL=debug
+
+secretGenerator:
+  - name: stack-secrets
+    envs:
+      - secrets.env
+
+# Hostnames come from stack.env and are copied into the Ingresses here, so
+# there is exactly one place to change them.
+replacements:
+  - source:
+      kind: ConfigMap
+      name: stack-config
+      fieldPath: data.INGRESS_HOST_OPENTODO
+    targets:
+      - select:
+          kind: Ingress
+          name: opentodo
+        fieldPaths:
+          - spec.rules.0.host
+          - spec.tls.0.hosts.0
+  - source:
+      kind: ConfigMap
+      name: stack-config
+      fieldPath: data.INGRESS_HOST_KEYCLOAK
+    targets:
+      - select:
+          kind: Ingress
+          name: keycloak
+        fieldPaths:
+          - spec.rules.0.host
+          - spec.tls.0.hosts.0
+      - select:
+          kind: Ingress
+          name: keycloak-admin
+        fieldPaths:
+          - spec.rules.0.host
+          - spec.tls.0.hosts.0
+
+patches:
+  - path: opentodo-ca-trust.yaml
+  # keycloak-admin shares keycloak's host and TLS Secret, so it must not ask
+  # cert-manager for one of its own.
+  - target:
+      kind: Ingress
+      name: opentodo|keycloak
+    patch: |-
+      - op: add
+        path: /metadata/annotations/cert-manager.io~1cluster-issuer
+        value: kind-ca
+  # kind's default storage provisioner is local-path on the node's disk;
+  # keep the claims small.
+  - target:
+      kind: PersistentVolumeClaim
+      name: opentodo-data
+    patch: |-
+      - op: replace
+        path: /spec/resources/requests/storage
+        value: 1Gi
+  - target:
+      kind: StatefulSet
+      name: keycloak-postgres
+    patch: |-
+      - op: replace
+        path: /spec/volumeClaimTemplates/0/spec/resources/requests/storage
+        value: 1Gi
+  # A single-node kind cluster is usually tight on memory. These are lower
+  # than anything you should run for real.
+  - target:
+      kind: Deployment
+      name: keycloak
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: 512Mi
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: 100m

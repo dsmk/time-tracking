@@ -1,0 +1,16 @@
+# {{ ansible_managed }}
+#
+# One bridge network for the whole stack. Only Caddy publishes ports to the
+# host; OpenTodo, Keycloak and PostgreSQL are reachable on this network and
+# nowhere else.
+#
+# The subnet is fixed so Caddy can hold a predictable address. That is what
+# lets OpenTodo resolve the *public* Keycloak hostname to the proxy from
+# inside the network, instead of hairpinning back out through the host — see
+# the AddHost= line in opentodo.container.j2.
+[Unit]
+Description=Network for the OpenTodo stack
+
+[Network]
+NetworkName={{ opentodo_network }}
+Subnet={{ opentodo_network_subnet }}

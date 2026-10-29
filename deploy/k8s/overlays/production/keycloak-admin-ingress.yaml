@@ -1,0 +1,43 @@
+# Optional: the Keycloak admin console on the public hostname.
+#
+# You do not need this for normal operation — the realm is created from the
+# import file, and `kubectl port-forward` covers one-off changes. Enable it
+# only if you want the console reachable, and only with a source range you
+# trust.
+#
+# Before uncommenting it in kustomization.yaml, replace the placeholder range
+# below with your own CIDRs. As shipped it allows 192.0.2.0/24, the reserved
+# TEST-NET-1 block, which will match none of your traffic.
+#
+# No cert-manager annotation: this shares the host, and therefore the
+# keycloak-tls Secret, with the Ingress in base. Two Ingresses asking
+# cert-manager for the same Secret would keep reissuing over each other.
+#
+# /realms/ and /resources/ are already published by that Ingress — the
+# console signs in through /realms/master/ and loads its assets from
+# /resources/. Only /admin/ (the console and the admin REST API) is added
+# here. If exposing /realms/master/ at all is unacceptable, put the source
+# restriction on the base Ingress too and reach everything over a VPN.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: keycloak-admin
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-buffer-size: "16k"
+    nginx.ingress.kubernetes.io/whitelist-source-range: "192.0.2.0/24"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: ["keycloak.example.com"]
+      secretName: keycloak-tls
+  rules:
+    - host: keycloak.example.com
+      http:
+        paths:
+          - path: /admin/
+            pathType: Prefix
+            backend:
+              service:
+                name: keycloak
+                port:
+                  name: http

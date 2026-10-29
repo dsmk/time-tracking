@@ -1,0 +1,53 @@
+# Only the paths Keycloak's own reverse-proxy guide says to expose:
+#
+#   /realms/      - OIDC discovery, authorization, token, userinfo, and the
+#                   broker callback GitHub redirects to
+#                   (/realms/<realm>/broker/github/endpoint)
+#   /resources/   - login-page assets
+#   /.well-known/ - provider metadata
+#
+# Kept internal on purpose: /admin/, /realms/master/, /metrics, /health and
+# the bare /. The realm is created by the import file, not by hand, so the
+# admin console is not needed for normal operation. To reach it:
+#
+#   kubectl -n opentodo port-forward deploy/keycloak 8080:8080
+#
+# and see deploy/k8s/README.md for the hostname caveat. The production overlay
+# ships an optional, IP-restricted admin Ingress if you would rather have one.
+#
+# /realms/master/ is a prefix of /realms/, so it is reachable through the rule
+# below. That is the account console for the master realm; the admin API and
+# console under /admin/ are not. Restrict further at the proxy if that matters
+# to you.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: keycloak
+  labels:
+    app.kubernetes.io/name: keycloak
+  annotations:
+    # Keycloak sets large cookies during a login flow; the stock 4k buffer
+    # overflows and returns 502.
+    nginx.ingress.kubernetes.io/proxy-buffer-size: "16k"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: ["keycloak.example.com"]
+      secretName: keycloak-tls
+  rules:
+    - host: keycloak.example.com
+      http:
+        paths:
+          - path: /realms/
+            pathType: Prefix
+            backend: &keycloak_http
+              service:
+                name: keycloak
+                port:
+                  name: http
+          - path: /resources/
+            pathType: Prefix
+            backend: *keycloak_http
+          - path: /.well-known/
+            pathType: Prefix
+            backend: *keycloak_http

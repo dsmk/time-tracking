@@ -1,0 +1,141 @@
+# Front end for the Ansible playbook in this directory.
+#
+# Ansible does the work — packages, quadlet units, podman secrets, the realm.
+# These recipes are the things you type: deploy it, look at it, rotate a
+# secret, tear it down. Run `just` for the list.
+#
+# Everything here goes through the inventory in ansible.cfg, so it works the
+# same against a remote host and against localhost.
+
+set shell := ["bash", "-euo", "pipefail", "-c"]
+
+# Use .vault-pass if you have one, otherwise prompt.
+vault := if path_exists(".vault-pass") == "true" { "--vault-password-file .vault-pass" } else { "--ask-vault-pass" }
+
+# The four systemd units quadlet generates.
+units := "caddy keycloak-postgres keycloak opentodo"
+
+_default:
+    @just --list --unsorted
+
+# ---------------------------------------------------------------------------
+# Setting up
+# ---------------------------------------------------------------------------
+
+# Copy the example inventory and group_vars into place.
+init:
+    @test -f inventory.yml || { cp inventory.example.yml inventory.yml; echo "wrote inventory.yml - edit it"; }
+    @echo "now: \$EDITOR inventory.yml group_vars/all.yml, then 'just vault-init'"
+
+# Create vault.yml with generated passwords, then encrypt it.
+vault-init:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -f vault.yml ]; then
+        echo "vault.yml already exists; use 'just vault-edit'" >&2
+        exit 1
+    fi
+    rand() { head -c 48 /dev/urandom | base64 | LC_ALL=C tr -dc 'A-Za-z0-9' | cut -c1-"${1:-32}"; }
+    sed -e "s|^vault_opentodo_setup_token: .*|vault_opentodo_setup_token: \"$(rand 32)\"|" \
+        -e "s|^vault_oidc_client_secret: .*|vault_oidc_client_secret: \"$(rand 40)\"|" \
+        -e "s|^vault_keycloak_admin_password: .*|vault_keycloak_admin_password: \"$(rand 24)\"|" \
+        -e "s|^vault_postgres_password: .*|vault_postgres_password: \"$(rand 24)\"|" \
+        vault.example.yml > vault.yml
+    chmod 600 vault.yml
+    echo "wrote vault.yml with generated passwords."
+    echo "Add your GitHub OAuth app credentials with 'just vault-edit', then encrypt it."
+    echo "Encrypting now:"
+    just vault-encrypt
+
+# Encrypt vault.yml in place.
+vault-encrypt:
+    ansible-vault encrypt {{ vault }} vault.yml
+
+# Open the encrypted vault in $EDITOR.
+vault-edit:
+    ansible-vault edit {{ vault }} vault.yml
+
+# Print the vault in the clear, to a terminal only.
+vault-show:
+    ansible-vault view {{ vault }} vault.yml
+
+# ---------------------------------------------------------------------------
+# Deploying
+# ---------------------------------------------------------------------------
+
+# Show what a deploy would change, without changing it.
+check *args:
+    ansible-playbook site.yml {{ vault }} --check --diff {{ args }}
+
+# Deploy the stack.
+deploy *args:
+    ansible-playbook site.yml {{ vault }} {{ args }}
+
+# Deploy without re-pulling images or touching the firewall.
+deploy-fast *args:
+    ansible-playbook site.yml {{ vault }} --skip-tags pull,firewall {{ args }}
+
+# Check the inventory is reachable.
+ping:
+    ansible opentodo -m ping
+
+# ---------------------------------------------------------------------------
+# Looking at it
+# ---------------------------------------------------------------------------
+
+# systemd state of all four units.
+status:
+    ansible opentodo -b -m command -a "systemctl --no-pager --lines=0 status {{ units }}"
+
+# What podman thinks is running, with health.
+ps:
+    ansible opentodo -b -m command -a "podman ps --all"
+
+# Logs for one unit. `just logs keycloak`
+logs service="opentodo" lines="200":
+    ansible opentodo -b -m command -a "journalctl --no-pager -u {{ service }}.service -n {{ lines }}"
+
+# Restart one unit. `just restart opentodo`
+restart service:
+    ansible opentodo -b -m systemd_service -a "name={{ service }}.service state=restarted"
+
+# The token OpenTodo's setup screen asks for when creating the owner account.
+setup-token:
+    @ansible-vault view {{ vault }} vault.yml | sed -n 's/^vault_opentodo_setup_token: *//p' | tr -d '"'
+
+# Fetch Caddy's internal CA root (TLS mode `internal` only) to ./caddy-root.crt.
+ca:
+    ansible opentodo -b -m fetch -a "src=/etc/opentodo/caddy-data/caddy/pki/authorities/local/root.crt dest=./caddy-root.crt flat=yes"
+    @echo "wrote caddy-root.crt - import it into your browser, or trust it system-wide"
+
+# Print the command for a Keycloak admin shell. It needs a tty, so it has to
+# be run on the host rather than through Ansible.
+kcadm:
+    @echo "ssh to the host, then:"
+    @echo "  podman exec -it keycloak /opt/keycloak/bin/kcadm.sh \\"
+    @echo "    config credentials --server http://localhost:8080 --realm master --user admin"
+
+# ---------------------------------------------------------------------------
+# Taking it down
+# ---------------------------------------------------------------------------
+
+# Stop everything. Data is kept.
+down:
+    ansible opentodo -b -m command -a "systemctl stop {{ units }}"
+
+# Stop everything and start it again.
+up:
+    ansible opentodo -b -m command -a "systemctl start {{ units }}"
+
+# Remove the units, the containers and ALL DATA. Asks first.
+destroy:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    read -r -p "Delete the stack and all its data on the inventory hosts? [y/N] " reply
+    case "$reply" in [yY]*) ;; *) echo "nothing done"; exit 0 ;; esac
+    ansible opentodo -b -m command -a "systemctl disable --now {{ units }}" || true
+    ansible opentodo -b -m shell -a "rm -f /etc/containers/systemd/opentodo.network /etc/containers/systemd/opentodo-data.volume /etc/containers/systemd/keycloak-pgdata.volume /etc/containers/systemd/caddy-config.volume /etc/containers/systemd/caddy.container /etc/containers/systemd/keycloak.container /etc/containers/systemd/keycloak-postgres.container /etc/containers/systemd/opentodo.container"
+    ansible opentodo -b -m systemd_service -a "daemon_reload=true"
+    ansible opentodo -b -m shell -a "podman volume rm -f opentodo-data keycloak-pgdata caddy-config || true"
+    ansible opentodo -b -m file -a "path=/etc/opentodo state=absent"
+    @echo "gone. Podman secrets are left in place; 'podman secret rm' them if you want."

@@ -1,0 +1,40 @@
+# {{ ansible_managed }}
+#
+# Keycloak's database. Not published anywhere; only Keycloak talks to it.
+[Unit]
+Description=PostgreSQL for Keycloak
+Requires={{ opentodo_network }}-network.service
+After={{ opentodo_network }}-network.service
+
+[Container]
+ContainerName=keycloak-postgres
+Image={{ postgres_image }}
+Network={{ opentodo_network }}.network
+
+Environment=POSTGRES_DB={{ keycloak_db_name }}
+Environment=POSTGRES_USER={{ keycloak_db_user }}
+# The image refuses to initialise into a non-empty mount point; a
+# subdirectory keeps lost+found out of the way.
+Environment=PGDATA=/var/lib/postgresql/data/pgdata
+Secret={{ secret_prefix }}-postgres-password,type=env,target=POSTGRES_PASSWORD
+
+Volume=keycloak-pgdata.volume:/var/lib/postgresql/data
+
+DropCapability=ALL
+NoNewPrivileges=true
+
+# With Notify=healthy, systemd treats this unit as started only once the
+# database actually accepts connections — which is what lets Keycloak declare
+# a plain After= and not race it.
+Notify=healthy
+HealthCmd=pg_isready -U {{ keycloak_db_user }} -d {{ keycloak_db_name }}
+HealthInterval=10s
+HealthRetries=10
+HealthStartPeriod=30s
+
+[Service]
+Restart=on-failure
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,29 @@
+---
+- name: Reload systemd and quadlet generators
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  listen: quadlet changed
+
+- name: Restart caddy
+  ansible.builtin.systemd_service:
+    name: caddy.service
+    state: restarted
+  listen: caddy changed
+
+- name: Restart keycloak
+  ansible.builtin.systemd_service:
+    name: keycloak.service
+    state: restarted
+  listen: keycloak changed
+
+- name: Restart opentodo
+  ansible.builtin.systemd_service:
+    name: opentodo.service
+    state: restarted
+  listen: opentodo changed
+
+- name: Reload firewalld
+  ansible.builtin.command:
+    argv: [firewall-cmd, --reload]
+  changed_when: true
+  listen: reload firewalld

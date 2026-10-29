@@ -1,0 +1,13 @@
+# Copy to inventory.yml and edit. One host; this stack is single-node by
+# design (OpenTodo is one SQLite file with one writer).
+---
+opentodo:
+  hosts:
+    # A remote host over ssh:
+    todo-host:
+      ansible_host: 203.0.113.10
+      ansible_user: root
+
+    # ...or this machine, with no ssh at all. Use one or the other.
+    # localhost:
+    #   ansible_connection: local

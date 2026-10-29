@@ -1,0 +1,169 @@
+# Keycloak, acting as the broker between GitHub and OpenTodo's OIDC client.
+#
+# Started with `start` (not `start-dev`, and not `--optimized`). `--optimized`
+# would require baking a custom image with `kc.sh build`; plain `start`
+# augments at boot from the stock image, which costs a slower first start and
+# keeps the deployment to manifests only. If you care about start-up time,
+# build an optimized image and add `--optimized` here.
+#
+# Settings follow https://www.keycloak.org/server/reverseproxy for edge TLS
+# termination: HTTP enabled on 8080, X-Forwarded-* trusted, a full-URL
+# hostname so issuer and redirect URLs are absolute and stable.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak
+  labels:
+    app.kubernetes.io/name: keycloak
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: keycloak
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: keycloak
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        # The Keycloak image is built for arbitrary UIDs with group 0 owning
+        # the writable paths, so 1000:0 is its own default layout.
+        runAsUser: 1000
+        runAsGroup: 0
+        fsGroup: 0
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # Turns realm-template.json plus the Secret values into the finished
+        # import file. See render-realm.sh for why this is not done by
+        # Keycloak itself.
+        - name: render-realm
+          image: quay.io/keycloak/keycloak:26.8.1
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "/realm/render-realm.sh"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: REALM
+              valueFrom:
+                configMapKeyRef: { name: stack-config, key: KEYCLOAK_REALM }
+            - name: OIDC_CLIENT_ID
+              valueFrom:
+                configMapKeyRef: { name: stack-config, key: OPENTODO_OIDC_CLIENT_ID }
+            - name: OPENTODO_BASE_URL
+              valueFrom:
+                configMapKeyRef: { name: stack-config, key: OPENTODO_BASE_URL }
+            - name: OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef: { name: stack-secrets, key: OIDC_CLIENT_SECRET }
+            - name: GITHUB_CLIENT_ID
+              valueFrom:
+                secretKeyRef: { name: stack-secrets, key: GITHUB_CLIENT_ID, optional: true }
+            - name: GITHUB_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef: { name: stack-secrets, key: GITHUB_CLIENT_SECRET, optional: true }
+            # Only the kind overlay sets these; production leaves them unset
+            # so the realm holds no local password accounts at all.
+            - name: DEV_USER
+              valueFrom:
+                configMapKeyRef: { name: stack-config, key: DEV_USER, optional: true }
+            - name: DEV_USER_EMAIL
+              valueFrom:
+                configMapKeyRef: { name: stack-config, key: DEV_USER_EMAIL, optional: true }
+            - name: DEV_USER_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: stack-secrets, key: DEV_USER_PASSWORD, optional: true }
+          volumeMounts:
+            - name: realm-source
+              mountPath: /realm
+              readOnly: true
+            - name: realm-import
+              mountPath: /opt/keycloak/data/import
+      containers:
+        - name: keycloak
+          image: quay.io/keycloak/keycloak:26.8.1
+          imagePullPolicy: IfNotPresent
+          args: ["start", "--import-realm"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: management
+              containerPort: 9000
+          env:
+            - name: KC_DB
+              value: postgres
+            - name: KC_DB_URL
+              value: jdbc:postgresql://keycloak-postgres:5432/keycloak
+            - name: KC_DB_USERNAME
+              value: keycloak
+            - name: KC_DB_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: stack-secrets, key: POSTGRES_PASSWORD }
+            # A full URL, so the issuer in the discovery document is exactly
+            # the string OpenTodo is configured with. The two must match
+            # character for character or token validation fails.
+            - name: KC_HOSTNAME
+              valueFrom:
+                configMapKeyRef: { name: stack-config, key: KC_HOSTNAME }
+            # Edge termination: the proxy speaks TLS, Keycloak speaks HTTP.
+            - name: KC_HTTP_ENABLED
+              value: "true"
+            - name: KC_PROXY_HEADERS
+              value: xforwarded
+            # /health/* and /metrics on the management port (9000). Never
+            # expose 9000 through the Ingress.
+            - name: KC_HEALTH_ENABLED
+              value: "true"
+            - name: KC_METRICS_ENABLED
+              value: "true"
+            # One replica, so no Infinispan cluster to form.
+            - name: KC_CACHE
+              value: local
+            # Used only while no admin account exists. Harmless afterwards.
+            - name: KC_BOOTSTRAP_ADMIN_USERNAME
+              valueFrom:
+                secretKeyRef: { name: stack-secrets, key: KC_BOOTSTRAP_ADMIN_USERNAME }
+            - name: KC_BOOTSTRAP_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: stack-secrets, key: KC_BOOTSTRAP_ADMIN_PASSWORD }
+          # A non-optimized `start` builds on boot, so allow generous time
+          # before the liveness probe can act: 5s * 72 = 6 minutes.
+          startupProbe:
+            httpGet: { path: /health/started, port: management }
+            periodSeconds: 5
+            failureThreshold: 72
+          readinessProbe:
+            httpGet: { path: /health/ready, port: management }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health/live, port: management }
+            periodSeconds: 30
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: 200m
+              memory: 768Mi
+            limits:
+              memory: 1536Mi
+          volumeMounts:
+            - name: realm-import
+              mountPath: /opt/keycloak/data/import
+              readOnly: true
+      volumes:
+        - name: realm-source
+          configMap:
+            name: keycloak-realm
+            defaultMode: 0555
+        - name: realm-import
+          emptyDir: {}

@@ -1,0 +1,36 @@
+---
+# Copy to vault.yml, fill in, then encrypt it:
+#
+#     just vault-encrypt
+#
+# Generate the passwords with something like:
+#
+#     tr -dc 'A-Za-z0-9' </dev/urandom | head -c 40; echo
+#
+# Or let the justfile do all of it: `just vault-init`.
+
+# OpenTodo's setup screen requires this for the very first account, because
+# the request arrives through Caddy rather than from loopback. At least 16
+# characters. Ignored once the owner account exists.
+vault_opentodo_setup_token: ""
+
+# Shared between Keycloak's client definition and OpenTodo's
+# OPENTODO_OIDC_CLIENT_SECRET. The same value has to reach both.
+vault_oidc_client_secret: ""
+
+# Keycloak's first admin account. Created only while no admin exists.
+vault_keycloak_admin_password: ""
+
+# The bundled PostgreSQL. Set it before the first deploy; changing it later
+# also needs an ALTER ROLE inside the database.
+vault_postgres_password: ""
+
+# GitHub OAuth app (Settings -> Developer settings -> OAuth Apps).
+# Authorization callback URL must be exactly:
+#
+#     https://<opentodo_keycloak_host>/realms/opentodo/broker/github/endpoint
+#
+# Leave both empty and the realm is created with no identity provider — the
+# stack still runs, and you sign in with Keycloak accounts.
+vault_github_client_id: ""
+vault_github_client_secret: ""

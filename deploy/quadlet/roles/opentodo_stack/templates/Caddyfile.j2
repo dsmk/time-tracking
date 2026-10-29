@@ -1,0 +1,95 @@
+# {{ ansible_managed }}
+#
+# Caddy terminates TLS for both hostnames and is the only thing on this host
+# listening on 80 and 443.
+{
+{% if opentodo_tls_mode == 'acme' %}
+    email {{ opentodo_acme_email }}
+{% else %}
+    # `internal` mode: Caddy runs its own CA and signs both hostnames with it.
+    # The root lands in {{ opentodo_config_dir }}/caddy-data/caddy/pki/authorities/local/root.crt,
+    # which is both what OpenTodo mounts to trust Keycloak and what you import
+    # into a browser.
+{% endif %}
+    admin 127.0.0.1:2019
+}
+
+# ---------------------------------------------------------------------------
+# OpenTodo
+# ---------------------------------------------------------------------------
+{{ opentodo_todo_host }} {
+{% if opentodo_tls_mode == 'internal' %}
+    tls internal
+{% endif %}
+
+    # Attachments (OPENTODO_ATTACHMENTS_MAX_FILE_MB, default 25) and imports
+    # (OPENTODO_IMPORT_MAX_MB, default 20) are uploaded through here. Keep
+    # this above whichever of those is larger.
+    request_body {
+        max_size {{ opentodo_max_body_size }}
+    }
+
+    # No `encode` on purpose: compressing a Server-Sent Events stream buffers
+    # it, and /api/v1/sync/events is one.
+    reverse_proxy opentodo:8080 {
+        # Flush every write straight through, so live updates on
+        # /api/v1/sync/events and the assistant's streamed answers arrive as
+        # they are produced rather than when a buffer fills.
+        flush_interval -1
+
+        # X-Forwarded-For is *appended* to here, which is what OpenTodo
+        # documents wanting: it trusts private-range proxies and then takes
+        # the nearest untrusted hop, so a client-supplied value cannot
+        # masquerade as the real address. Note this is the opposite of what
+        # Keycloak wants, below.
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Keycloak
+# ---------------------------------------------------------------------------
+#
+# Only the paths Keycloak's own reverse-proxy guide says to publish:
+#
+#   /realms/      OIDC discovery, authorization, token, userinfo, and the
+#                 broker callback GitHub redirects to
+#   /resources/   login-page assets
+#   /.well-known/ provider metadata
+#
+# Everything else — /admin/, /metrics, /health, the bare / — is answered 404
+# here and never reaches the container.
+{{ opentodo_keycloak_host }} {
+{% if opentodo_tls_mode == 'internal' %}
+    tls internal
+{% endif %}
+
+{% if keycloak_expose_admin | bool %}
+    # The admin console, restricted by source address. You do not need it for
+    # normal operation: the realm comes from the import file.
+    @admin {
+        path /admin/*
+        remote_ip {{ keycloak_admin_allow_ranges | join(' ') }}
+    }
+    handle @admin {
+        reverse_proxy keycloak:8080 {
+            header_up X-Forwarded-For {remote_host}
+        }
+    }
+
+{% endif %}
+    @public path /realms/* /resources/* /.well-known/*
+    handle @public {
+        reverse_proxy keycloak:8080 {
+            # Keycloak's guide says the proxy must *overwrite* X-Forwarded-*
+            # rather than append, because with KC_PROXY_HEADERS=xforwarded it
+            # reads the first entry. Caddy appends by default, so a client
+            # could put its own value in front; replacing the header closes
+            # that off.
+            header_up X-Forwarded-For {remote_host}
+        }
+    }
+
+    handle {
+        respond "Not found" 404
+    }
+}

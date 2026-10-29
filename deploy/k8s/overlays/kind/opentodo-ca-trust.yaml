@@ -1,0 +1,38 @@
+# Make OpenTodo trust the kind cluster's self-signed CA.
+#
+# OpenTodo fetches <issuer>/.well-known/openid-configuration and then calls
+# the token endpoint itself, over https, from inside the pod. With a
+# cert-manager CA issuer that certificate chains to a root no public trust
+# store knows about, so discovery fails with a certificate error and sign-in
+# never gets off the ground.
+#
+# cert-manager puts the issuing CA in `ca.crt` of every Secret a CA issuer
+# produces, so the certificate the Ingress already uses carries what we need.
+#
+# SSL_CERT_FILE *replaces* the Go trust store rather than adding to it. That
+# is acceptable here only because this overlay turns off every other outbound
+# https call OpenTodo would make (OPENTODO_PUSH=off, and webhooks, SMTP and
+# the assistant are off by default). Do not copy this patch into production.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opentodo
+spec:
+  template:
+    spec:
+      containers:
+        - name: opentodo
+          env:
+            - name: SSL_CERT_FILE
+              value: /etc/ssl/kind-ca/ca.crt
+          volumeMounts:
+            - name: kind-ca
+              mountPath: /etc/ssl/kind-ca
+              readOnly: true
+      volumes:
+        - name: kind-ca
+          secret:
+            secretName: opentodo-tls
+            items:
+              - key: ca.crt
+                path: ca.crt

@@ -1,0 +1,51 @@
+# {{ ansible_managed }}
+#
+# The only container that touches the host's network. It terminates TLS for
+# both hostnames and is the single place certificates are managed.
+#
+# It also answers to both public hostnames *inside* the podman network, via
+# NetworkAlias and a fixed address, so OpenTodo can reach Keycloak at the
+# same issuer URL a browser uses. See opentodo.container.j2.
+[Unit]
+Description=Caddy, TLS termination for the OpenTodo stack
+Requires={{ opentodo_network }}-network.service
+After={{ opentodo_network }}-network.service
+
+[Container]
+ContainerName=caddy
+Image={{ caddy_image }}
+Network={{ opentodo_network }}.network
+IP={{ caddy_ip }}
+NetworkAlias={{ opentodo_todo_host }}
+NetworkAlias={{ opentodo_keycloak_host }}
+
+PublishPort=80:80
+PublishPort=443:443
+PublishPort=443:443/udp
+
+Volume={{ opentodo_config_dir }}/Caddyfile:/etc/caddy/Caddyfile:ro,Z
+# Caddy's /data holds the ACME account, the issued certificates, and — in
+# `internal` mode — the local CA whose root OpenTodo has to trust. Keeping it
+# on the host rather than in a named volume means that root is a plain file
+# Ansible can hand to the OpenTodo container, and that certificates are
+# included in an ordinary backup of {{ opentodo_config_dir }}.
+Volume={{ opentodo_config_dir }}/caddy-data:/data:Z
+Volume=caddy-config.volume:/config
+
+# Caddy binds 80 and 443 inside the container, so it keeps exactly one
+# capability and drops the rest.
+DropCapability=ALL
+AddCapability=NET_BIND_SERVICE
+NoNewPrivileges=true
+
+HealthCmd=wget --quiet --spider http://127.0.0.1:2019/config/
+HealthInterval=30s
+HealthRetries=3
+HealthStartPeriod=10s
+
+[Service]
+Restart=on-failure
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

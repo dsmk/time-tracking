@@ -1,0 +1,36 @@
+# The Keycloak admin console, exposed without restriction.
+#
+# This is fine here and nowhere else: the cluster is a throwaway on your own
+# machine and the hostname resolves only through your /etc/hosts. Look at the
+# brokered identity, the client, and the login flows here before you try the
+# same thing in production.
+#
+#   https://keycloak.kind.test/admin/   (credentials in secrets.env)
+#
+# No cert-manager annotation: this shares the host, and therefore the
+# keycloak-tls Secret, with the Ingress in base. Two Ingresses asking
+# cert-manager for the same Secret would keep reissuing over each other.
+# /realms/ and /resources/ are already published there, which is where the
+# console's own assets and token calls go.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: keycloak-admin
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-buffer-size: "16k"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: ["keycloak.kind.test"]
+      secretName: keycloak-tls
+  rules:
+    - host: keycloak.kind.test
+      http:
+        paths:
+          - path: /admin/
+            pathType: Prefix
+            backend:
+              service:
+                name: keycloak
+                port:
+                  name: http

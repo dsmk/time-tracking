@@ -1,0 +1,26 @@
+# A single-node kind cluster that can serve :80 and :443 on the host, so the
+# same Ingress resources used in production work unchanged.
+#
+#   kind create cluster --name opentodo --config cluster.yaml
+#
+# The node label and the two port mappings are what ingress-nginx's "kind"
+# deployment manifest expects: it schedules onto ingress-ready=true and binds
+# hostPort 80/443 on that node.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: opentodo
+nodes:
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    extraPortMappings:
+      - containerPort: 80
+        hostPort: 80
+        protocol: TCP
+      - containerPort: 443
+        hostPort: 443
+        protocol: TCP

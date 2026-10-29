@@ -1,0 +1,88 @@
+---
+# Defaults for the opentodo_stack role. Override the ones you care about in
+# group_vars/all/main.yml (non-secret) or your vault (secret).
+
+# --- what gets served -----------------------------------------------------
+opentodo_todo_host: todo.example.com
+opentodo_keycloak_host: keycloak.example.com
+
+# Derived, and deliberately not separately configurable: OpenTodo's issuer
+# must equal the "issuer" field Keycloak publishes, which is
+# <KC_HOSTNAME>/realms/<realm>. Setting it by hand is how these drift.
+opentodo_realm: opentodo
+opentodo_oidc_issuer: "https://{{ opentodo_keycloak_host }}/realms/{{ opentodo_realm }}"
+opentodo_oidc_client_id: opentodo
+# The label on OpenTodo's sign-in button.
+opentodo_oidc_display_name: GitHub
+
+# --- TLS ------------------------------------------------------------------
+# acme     - Caddy gets certificates from Let's Encrypt. Needs both hostnames
+#            to resolve publicly to this host, and 80/443 reachable.
+# internal - Caddy runs its own CA. For a host on a private network, or for
+#            trying the stack out. See the README for what else this changes.
+opentodo_tls_mode: acme
+opentodo_acme_email: admin@example.com
+
+# --- images ---------------------------------------------------------------
+# Pinned. `stable`/`latest` move with every release.
+opentodo_image: ghcr.io/pixari/opentodo:0.16.0
+keycloak_image: quay.io/keycloak/keycloak:26.8.1
+postgres_image: docker.io/library/postgres:17-alpine
+caddy_image: docker.io/library/caddy:2.10-alpine
+
+# --- host layout ----------------------------------------------------------
+opentodo_config_dir: /etc/opentodo
+opentodo_quadlet_dir: /etc/containers/systemd
+
+# --- podman network -------------------------------------------------------
+opentodo_network: opentodo
+opentodo_network_subnet: 10.89.70.0/24
+# Caddy's fixed address on that network. OpenTodo resolves the public
+# Keycloak hostname to it.
+caddy_ip: 10.89.70.10
+
+# --- the rest -------------------------------------------------------------
+keycloak_db_name: keycloak
+keycloak_db_user: keycloak
+keycloak_admin_user: admin
+
+# Publish the Keycloak admin console through Caddy, restricted to these
+# source ranges. Off by default; the realm is created from the import file,
+# so the console is not needed to run the stack.
+keycloak_expose_admin: false
+keycloak_admin_allow_ranges:
+  - 192.0.2.0/24   # TEST-NET-1: matches nothing. Replace before enabling.
+
+# Must stay above OPENTODO_ATTACHMENTS_MAX_FILE_MB and OPENTODO_IMPORT_MAX_MB.
+opentodo_max_body_size: 32MB
+
+# Set when another proxy sits in front of Caddy (`cloudflare` is a keyword
+# OpenTodo recognises). Empty means "trust private ranges", which already
+# covers {{ opentodo_network_subnet }}.
+opentodo_trusted_proxies: ""
+
+# Set to "off" to block outbound web push. `internal` TLS mode forces it,
+# because SSL_CERT_FILE replaces the trust store there and every other
+# outbound https call would fail anyway.
+opentodo_push: "{{ 'off' if opentodo_tls_mode == 'internal' else '' }}"
+
+# The named podman volumes. Caddy's /data is a host bind mount instead, so
+# its CA root and certificates are ordinary files you can read and back up.
+opentodo_volumes:
+  - name: opentodo-data
+    description: OpenTodo SQLite database, secrets, VAPID key and local backups
+  - name: keycloak-pgdata
+    description: PostgreSQL data for Keycloak
+  - name: caddy-config
+    description: Caddy's autosaved configuration
+
+# Prefix for the podman secrets this role creates.
+secret_prefix: opentodo
+
+# Open 80/443 with firewall-cmd when firewalld is running.
+opentodo_manage_firewall: true
+
+# Where the shared realm definition lives. The Kubernetes deployment under
+# deploy/k8s renders the same template with the same script, so the realm
+# cannot drift between the two.
+opentodo_realm_src: "{{ playbook_dir }}/../k8s/base/keycloak"
