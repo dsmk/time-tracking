@@ -1,614 +1,442 @@
-# Time Tracker CLI — Local MVP Specification
+# OpenTodo Time Tracking CLI — Specification
 
 ## 1. Purpose
 
-Build a command-line time tracker inspired by the speed and text-oriented
-workflow of klog. The MVP runs entirely on one machine:
+Build a Rust or Go command-line client that makes OpenTodo time tracking fast
+and convenient from a terminal.
 
-- Users can start and stop timers, create and edit entries, and generate reports.
-- All data is stored locally in SQLite.
-- Core tracking and reporting work without network access.
-- Each entry has a stable ID and revision field so synchronization can be added
-  later without redesigning the data model.
+OpenTodo is the system of record for tasks and time entries. The CLI uses
+OpenTodo's documented command-line interface or another officially documented
+integration interface. OpenTodo's web interface is used to browse and manage
+the same data, and OpenTodo is responsible for synchronizing data between
+supported clients.
 
-The implementation may use Rust. This specification does not require a
-particular CLI framework or database library.
+The CLI may add convenience features such as shell-friendly commands, weekly
+reports, and exports. It must not create a separate authoritative time-tracking
+database or write directly to OpenTodo's internal files or database.
 
-## 2. Product principles
+References:
 
-1. **Local-first:** A network connection is never needed to track time.
-2. **Fast common operations:** Starting, stopping, and pausing a timer should require
-   only one command.
-3. **No silent data loss:** Destructive operations require confirmation or an
-   explicit `--yes` option.
-4. **Predictable time handling:** Store absolute timestamps; use the configured
-   timezone for display and reporting.
-5. **Human-readable output:** Default output is suitable for a terminal.
-6. **Automation-friendly output:** Commands that list or report data support
-   JSON; reports also support CSV.
-7. **Sync-ready records:** Use UUIDs, revisions, and deletion tombstones.
+- OpenTodo CLI: https://open-todo.app/docs/cli/
+- OpenTodo time tracking: https://open-todo.app/docs/time-tracking/
 
-## 3. Name and command conventions
+## 2. Design principles
 
-Use `tt` as the example executable name. The actual binary name may be
-configured by the project.
+1. **OpenTodo owns the data.** Tasks and time entries are stored and synchronized
+   by OpenTodo using its supported mechanisms.
+2. **Use documented interfaces.** Do not depend on undocumented APIs, database
+   schemas, or internal application files.
+3. **Keep the CLI thin.** Reuse OpenTodo's time-entry behavior instead of
+   implementing a second timer or data model.
+4. **Keep reports honest.** If OpenTodo does not provide a required report,
+   calculate it from data obtained through a documented interface and describe
+   any limitations.
+5. **Offline behavior must be verified.** Do not claim that time entries can be
+   created offline or automatically synchronized until tested against the
+   documented OpenTodo behavior.
+6. **The OpenTodo web interface remains available.** Users must be able to view
+   and manage the time-tracking data using OpenTodo's supported web interface.
 
-Examples:
+## 3. Required compatibility investigation
 
-```text
-tt start "Design review" --project alpha
-tt stop
-tt log
-tt report week
-```
+Before implementing the adapter, inspect the current OpenTodo CLI and time
+tracking documentation and record findings in
+`docs/opentodo-compatibility.md`.
 
-Descriptions are positional text. Project and tag metadata are supplied using
-flags.
+Document:
 
-## 4. Scope
+- Minimum supported OpenTodo version; target 0.9 or later.
+- The documented `ot` commands for starting, stopping, listing, and editing
+  time entries, if provided.
+- How those commands identify or associate a time entry with a task.
+- Whether commands return machine-readable output such as JSON.
+- Whether the CLI can operate while offline.
+- Whether changes made offline are synchronized automatically after reconnect.
+- How sync status, failures, and conflicts are reported.
+- Whether operations support stable IDs or idempotency.
+- Authentication and instance configuration.
+- Any limits on querying historical entries for reports.
+- Which behavior was tested rather than inferred from documentation.
 
-### Included in the MVP
+Do not invent `ot` command syntax. The adapter must be based on commands or APIs
+confirmed in the documentation.
 
-- Local SQLite database
-- Start, stop, and inspect the active timer
-- Add, list, edit, and delete time entries
-- Project and tag metadata (using #tagname )
-- Weekly and date-range reports
-- Text, JSON, and CSV output where specified
-- User configuration for timezone, week start, and display behavior
-- Database initialization and schema migrations
-
-### Not included in the MVP
-
-- Server, accounts, authentication, or synchronization
-- Background daemon or scheduled timer
-- GUI or web interface
-- Automatic activity detection
-- Billing, invoicing, or payroll features
-- Shared projects or multi-user data
-- Natural-language date parsing beyond the formats specified below
-- Import from or export to another time-tracking application
-
-## 5. Storage and configuration locations
-
-Use operating-system-standard directories where available.
-
-Suggested defaults:
-
-- Database: `$XDG_DATA_HOME/tt/tt.db`, or
-  `~/.local/share/tt/tt.db` when `XDG_DATA_HOME` is unset
-- Configuration: `$XDG_CONFIG_HOME/tt/config.toml`, or
-  `~/.config/tt/config.toml`
-- Logs, if any: `$XDG_STATE_HOME/tt/`, or `~/.local/state/tt/`
-
-On macOS and Windows, use their standard application-data directories instead
-of requiring XDG variables.
-
-The CLI must allow overriding the database path:
+## 4. Architecture
 
 ```text
-tt --db /path/to/tt.db ...
+┌──────────────────┐
+│ User             │
+└────────┬─────────┘
+         │
+         ├─────────────────────┐
+         ▼                     ▼
+┌──────────────────┐  ┌──────────────────────┐
+│ `tt` CLI         │  │ OpenTodo web UI      │
+│ Rust or Go       │  │ tasks and time data  │
+└────────┬─────────┘  └──────────┬───────────┘
+         │                       │
+         │ documented interface  │
+         └──────────┬────────────┘
+                    ▼
+           ┌───────────────────┐
+           │ OpenTodo          │
+           │ data and sync     │
+           └───────────────────┘
 ```
 
-A command-line database path takes precedence over an environment variable and
-the default path. If an environment variable such as `TT_DB` is implemented,
-document its precedence.
+The CLI should use the documented `ot` command-line client where suitable.
+If the CLI documentation provides a supported API or SDK that is more
+appropriate, that may be used instead.
 
-The database should be created automatically on the first command that needs
-it. A `tt init` command may also be provided to initialize it explicitly.
+The implementation must not call the `ot` command by constructing a shell
+string. Invoke it with an argument array through the process API, and safely
+handle user-provided descriptions, task names, and identifiers.
 
-## 6. Configuration
+If the `ot` client is not installed or cannot connect to a configured OpenTodo
+instance, print an actionable error. Do not silently fall back to writing
+records somewhere else.
 
-Configuration is TOML. Every setting has a usable default.
+## 5. Scope
 
-Example:
+### Included
 
-```toml
-timezone = "America/New_York"
-week_start = "monday"
-duration_precision = "minute"
-default_project = ""
-```
+- A Rust or Go CLI named `tt` (working name).
+- Integration with documented OpenTodo time-tracking operations.
+- Convenient start, stop, status, and listing commands.
+- Weekly and date-range reports, if supported by OpenTodo or safely derivable
+  from documented output.
+- Optional JSON and CSV report output.
+- Sync-status visibility when OpenTodo exposes it.
+- Automated tests using a mock OpenTodo command or provider.
 
-### Settings
+### Not included
 
-| Setting | Default | Meaning |
-|---|---|---|
-| `timezone` | System local timezone | IANA timezone used for display and reports |
-| `week_start` | `monday` | First day of the reporting week; may be any weekday |
-| `duration_precision` | `minute` | Display durations to the nearest minute or second |
-| `default_project` | Empty | Optional project applied to new entries |
+- A replacement web interface.
+- A replacement sync service or account system.
+- Direct access to OpenTodo's internal database or files.
+- A second authoritative SQLite database for time entries.
+- Claims of offline support not demonstrated by the compatibility investigation.
+- Direct manipulation of OpenTodo's private network protocols.
 
-Invalid configuration must produce an actionable error identifying the setting
-and file. Unknown keys may be ignored in the MVP, but should produce a warning
-if practical.
+## 6. CLI behavior
 
-Provide:
+The commands below specify the desired user experience. The implementation must
+map them to the actual, documented OpenTodo CLI/API operations. These are
+`tt` commands, not claims about OpenTodo's command syntax.
+
+### 6.1 `tt start`
 
 ```text
-tt config show
-tt config set timezone America/New_York
-tt config set week_start monday
+tt start "Design review"
+tt start "Design review" --task TASK_ID
 ```
-
-If `config set` is not implemented, document that settings must be edited in
-the TOML file.
-
-## 7. Data model
-
-Use SQLite with schema migrations. Store timestamps as UTC RFC 3339 strings or
-integer Unix timestamps at a documented precision. Do not mix formats.
-
-### `entries` table
-
-| Field | Type | Rules |
-|---|---|---|
-| `id` | UUID text | Primary key; generated on creation |
-| `start_at` | UTC timestamp | Required |
-| `end_at` | UTC timestamp | Null means timer is running |
-| `description` | Text | Required; trimmed; must not be empty |
-| `project` | Text | Optional; normalized by trimming whitespace |
-| `created_at` | UTC timestamp | Required |
-| `updated_at` | UTC timestamp | Required; updated on every mutation |
-| `revision` | Integer | Starts at 1; increments on every mutation |
-| `deleted_at` | UTC timestamp | Null unless soft-deleted |
-| `timezone` | IANA timezone name | Timezone in effect when the entry was created |
-
-### `entry_tags` table
-
-| Field | Type | Rules |
-|---|---|---|
-| `entry_id` | UUID text | Foreign key to `entries.id` |
-| `tag` | Text | Non-empty, trimmed |
-| Primary key | `(entry_id, tag)` | A tag may appear only once per entry |
-
-Tag comparisons should be case-insensitive for duplicate detection. Preserve the
-first spelling entered for display.
-
-### Data constraints
-
-- At most one **non-deleted running entry** may exist at a time.
-- By default, completed entries may not overlap another completed or running
-  entry. The CLI must detect overlap before creating, editing, or starting an
-  entry.
-- An overlap may be explicitly allowed with `--allow-overlap`. If allowed, it
-  must remain visible in reports or an overlap-warning command.
-- `end_at` must be later than `start_at`.
-- Deleting an entry sets `deleted_at`; it does not physically remove the row.
-- Normal list and report commands exclude deleted entries.
-- UUIDs are generated locally and never depend on a server.
-
-## 8. Time and timezone behavior
-
-- Store `start_at` and `end_at` as absolute UTC instants.
-- Convert timestamps to the configured timezone when displaying entries and
-  calculating calendar-day or weekly reports.
-- Record the IANA timezone used at entry creation in the entry’s `timezone`
-  field.
-- A timestamp with `Z` or an explicit UTC offset is unambiguous and may be
-  accepted directly.
-- A timestamp without an offset is interpreted in the configured timezone.
-- If a local time is ambiguous because of a daylight-saving transition, reject
-  it and ask the user to provide an explicit offset.
-- If a local time does not exist because of a daylight-saving transition,
-  reject it and explain why.
-- The MVP accepts RFC 3339 timestamps, for example:
-  `2026-10-27T09:30`, `2026-10-27T09:30-04:00`, or
-  `2026-10-27T13:30:00Z`.
-- “Today” and the default report period are determined using the configured
-  timezone.
-- Duration is calculated from the stored instants. Do not alter stored times
-  when displaying rounded durations.
-
-## 9. CLI commands
-
-All commands should provide `--help`. Invalid input should result in a
-non-zero exit status and an actionable error message.
-
-### 9.1 `tt init`
-
-Initialize the database and create the required tables.
-
-```text
-tt init
-tt init --db /path/to/tt.db
-```
-
-Running `init` against an already initialized database must be safe.
-
-### 9.2 `tt start`
-
-Start a timer at the current time.
-
-```text
-tt start "Implement login"
-tt start "Implement login" --project app
-tt start "Investigate alert" --project platform --tag incident --tag oncall
-```
-
-Options:
-
-| Option | Meaning |
-|---|---|
-| `--project TEXT` | Assign a project |
-| `--tag TEXT` | Add a tag; repeatable |
-| `--at TIME` | Start at a specified timestamp; default is now |
-| `--allow-overlap` | Allow overlap with another entry |
 
 Behavior:
 
-- Require a non-empty description.
-- If `--project` is absent, use `default_project` if configured.
-- If another timer is running, fail without changing it. Include the running
-  entry’s description and ID in the error.
-- If the proposed start time overlaps an entry, fail unless
-  `--allow-overlap` is supplied.
-- A timer started with `--at` is still running until stopped.
-- On success, print the entry ID, description, start time, project, and tags.
+- Start a time-tracking entry using OpenTodo's supported operation.
+- If `--task` is supplied, associate the entry with that OpenTodo task using a
+  supported task identifier or lookup.
+- If task selection is interactive, allow the user to choose a task when
+  running in a terminal.
+- In non-interactive mode, require sufficient task information.
+- Display the result returned by OpenTodo, including any available entry or task
+  identifier and start time.
+- Do not start a second timer unless OpenTodo supports that behavior and the
+  user explicitly requests it.
 
-### 9.3 `tt stop`
-
-Stop the running timer at the current time.
+### 6.2 `tt stop`
 
 ```text
 tt stop
-tt stop --at 2026-10-27T12:15
 ```
-
-Options:
-
-| Option | Meaning |
-|---|---|
-| `--at TIME` | Stop at a specified timestamp; default is now |
 
 Behavior:
 
-- If no timer is running, fail with a clear message.
-- Require the stop time to be later than the start time.
-- Before stopping, detect overlap with other entries. On overlap, fail and leave
-  the timer running unless an overlap-allowing option is provided.
-- On success, print the completed entry and its duration.
+- Stop the active time-tracking entry using OpenTodo's supported operation.
+- If no timer is active, report that clearly and exit without changing data.
+- Display the completed entry and duration when OpenTodo returns that
+  information.
 
-### 9.4 `tt status`
-
-Show the running timer, if any.
+### 6.3 `tt status`
 
 ```text
 tt status
 tt status --json
 ```
 
-If no timer is running, print a concise “No timer running” message and exit
-successfully. For JSON output, return a documented empty representation, such as
-`null`.
+Show the currently running timer, if available through the documented
+interface. If none is running, print a concise message.
 
-### 9.5 `tt add`
+JSON output is supported only if the OpenTodo CLI/API provides structured data
+or the adapter can reliably construct JSON from documented output. Do not parse
+unstable, human-oriented output as though it were a stable API.
 
-Create a completed entry.
-
-```text
-tt add "Code review" --start 2026-10-27T09:00 --end 2026-10-27T10:30
-tt add "Code review" --start 2026-10-27T09:00 --duration 90m --project alpha
-```
-
-Required timing options:
-
-- `--start TIME`
-- Exactly one of:
-  - `--end TIME`
-  - `--duration DURATION`
-
-Supported duration syntax in the MVP: integer values with `s`, `m`, or `h`
-units, including combinations such as `1h30m`. For example: `90m`, `1h30m`,
-`45s`.
-
-Additional options:
-
-| Option | Meaning |
-|---|---|
-| `--project TEXT` | Assign a project |
-| `--tag TEXT` | Add a tag; repeatable |
-| `--allow-overlap` | Allow overlap with another entry |
-
-Behavior:
-
-- Validate that the resulting end time is later than the start time.
-- Apply `default_project` when `--project` is absent.
-- Check for overlaps unless explicitly allowed.
-- Print the created entry and its duration.
-
-### 9.6 `tt log`
-
-List entries, newest first by default.
+### 6.4 `tt log`
 
 ```text
 tt log
 tt log --today
 tt log --from 2026-10-20 --to 2026-10-27
-tt log --project alpha
-tt log --tag incident
-tt log --limit 50
-tt log --json
+tt log --task TASK_ID
 ```
+
+List time entries using supported OpenTodo queries or exports.
 
 Options:
 
-| Option | Meaning |
-|---|---|
-| `--today` | Show entries touching today in the configured timezone |
-| `--from DATE` | Inclusive start date |
-| `--to DATE` | Inclusive end date |
-| `--project TEXT` | Filter by project |
-| `--tag TEXT` | Filter by tag |
-| `--search TEXT` | Case-insensitive substring search in description |
-| `--limit N` | Limit the number of results |
-| `--json` | Emit JSON |
+- `--today`: entries touching today in the selected timezone
+- `--from DATE`: inclusive start date
+- `--to DATE`: inclusive end date
+- `--task ID`: filter by task
+- `--format text|json`: output format, if the integration can provide reliable
+  structured data
 
-Rules:
+If OpenTodo cannot query or export the needed entry data through a documented
+interface, report that limitation rather than scraping its UI or private
+storage.
 
-- `--today` cannot be combined with `--from` or `--to`.
-- `--from` and `--to` are calendar dates in the configured timezone.
-- If only `--from` is supplied, include entries from that date onward.
-- If only `--to` is supplied, include entries through that date.
-- Entries that cross a date boundary are included if any portion overlaps the
-  requested period.
-- Running entries appear with an “in progress” marker and a duration calculated
-  through the current time.
-- Normal output shows date, start, end or running status, duration,
-  description, project, tags, and a short ID.
-- JSON must include the full UUID and machine-readable timestamps.
-
-### 9.7 `tt show`
-
-Show one entry by UUID or unambiguous UUID prefix.
-
-```text
-tt show <id>
-tt show <id> --json
-```
-
-If a prefix matches more than one entry, require a longer prefix. Deleted
-entries are not shown unless an explicit `--include-deleted` option is provided.
-
-### 9.8 `tt edit`
-
-Edit an entry. At least one editable field must be supplied.
-
-```text
-tt edit <id> --description "Review revised design"
-tt edit <id> --project alpha
-tt edit <id> --start 2026-10-27T09:15 --end 2026-10-27T10:45
-tt edit <id> --tag incident --add-tag urgent
-tt edit <id> --remove-tag old-tag
-```
-
-Options:
-
-| Option | Meaning |
-|---|---|
-| `--description TEXT` | Replace description |
-| `--project TEXT` | Set project; use `--clear-project` to remove |
-| `--start TIME` | Replace start time |
-| `--end TIME` | Replace end time; only valid for a completed entry |
-| `--tag TEXT` | Replace all tags; repeatable |
-| `--add-tag TEXT` | Add a tag; repeatable |
-| `--remove-tag TEXT` | Remove a tag; repeatable |
-| `--clear-project` | Remove the project |
-| `--allow-overlap` | Allow the edited entry to overlap another entry |
-
-Editing must validate the resulting entry as a whole. Update `updated_at` and
-increment `revision` on success. Failed edits must leave the entry unchanged.
-
-### 9.9 `tt delete`
-
-Soft-delete an entry.
-
-```text
-tt delete <id>
-tt delete <id> --yes
-```
-
-Without `--yes`, ask for confirmation when attached to an interactive
-terminal. If standard input is not interactive, require `--yes`.
-
-Soft-deleting a running timer is allowed only after confirmation or `--yes`;
-the CLI must clearly state that the timer is being discarded rather than
-stopped. Update `deleted_at`, `updated_at`, and `revision`.
-
-### 9.10 `tt report`
-
-Generate time summaries.
+### 6.5 `tt report week`
 
 ```text
 tt report week
 tt report week --week 2026-10-27
-tt report week --project alpha
-tt report range --from 2026-10-01 --to 2026-10-31
 tt report week --format json
 tt report week --format csv
 ```
 
-#### Weekly report
+Generate a weekly report using either:
 
-- `tt report week` reports the current week in the configured timezone.
-- `--week DATE` selects the week containing that date.
-- Week boundaries use `week_start` from configuration.
-- The report period begins at local midnight on the first day and ends at local
-  midnight on the day after the last day.
-- The period is treated as a half-open interval: `[start, end)`.
-- Entries crossing the period boundary contribute only the portion that falls
-  within the report period.
-- A running entry contributes time through the current instant, clipped to the
-  report period.
+1. OpenTodo's documented reporting capability, if it provides the required
+   period and grouping; or
+2. Time-entry data returned by a documented CLI/API operation.
 
-#### Range report
+A report should include, where the available data permits:
 
-- `--from DATE` and `--to DATE` are inclusive local calendar dates.
-- Internally, calculate over the half-open interval from midnight at the start
-  of `--from` through midnight after `--to`.
-- Reject invalid dates and `--from` later than `--to`.
-
-#### Report contents
-
-Text output includes:
-
-- Report title and date range
-- Total duration
-- Duration by project, including an “Unassigned” group
+- Report date range
+- Total tracked duration
 - Daily totals
-- Duration by tag when tags are present
-- An overlap warning if overlapping entries contribute to the report
+- Duration by task
+- Unassigned or taskless duration, if applicable
+- An indication if entries are still running or data is incomplete
 
-Entries with no project are grouped under “Unassigned.” Totals are calculated
-from actual elapsed time. A day affected by a daylight-saving transition may
-therefore contain 23 or 25 elapsed hours.
+The week start and timezone behavior must be documented. Do not assume OpenTodo's
+week-start or timezone settings; either honor the relevant OpenTodo setting or
+provide a clearly documented CLI option.
 
-Formats:
+### 6.6 `tt report range`
 
-- `--format text` (default): readable terminal report
-- `--format json`: structured report with ISO timestamps and durations in
-  seconds
-- `--format csv`: rows suitable for spreadsheet import, including period,
-  group type, group name, and duration in seconds
+```text
+tt report range --from 2026-10-01 --to 2026-10-31
+```
 
-Reports should not round values before aggregation. Apply configured display
-rounding only when rendering text output.
+Dates are inclusive local calendar dates. The report must use the configured or
+OpenTodo-provided timezone consistently and clip entries at the report
+boundaries.
 
-### 9.11 `tt completion` (optional)
+If required timezone or historical data is unavailable through the supported
+interface, explain the limitation.
 
-If supported by the CLI framework, provide shell completion for common
-subcommands and options. This is not required for the MVP.
+### 6.7 `tt sync status`
 
-## 10. Output requirements
+```text
+tt sync status
+```
 
-### Human-readable output
+Show OpenTodo synchronization status if exposed by the supported CLI/API. The
+command must distinguish among:
 
-- Use a consistent local date/time format and document it.
-- Clearly distinguish running entries from completed entries.
-- Include short IDs in list output and full IDs in `show` and JSON output.
-- Send diagnostics and errors to standard error.
-- Send command results to standard output.
+- Synchronized
+- Sync in progress
+- Offline or unreachable
+- Pending local changes
+- Conflict or failure
+- Sync status unavailable
 
-### JSON output
+Do not infer “synchronized” merely because a CLI command succeeded.
 
-- Use stable field names and valid JSON.
-- Do not print progress messages or decorative text to standard output when
-  JSON is requested.
-- Timestamps must include an explicit timezone or use UTC with `Z`.
-- Durations in JSON are integer seconds.
-- JSON array order must be deterministic.
+### 6.8 `tt sync`
 
-### Exit status
+```text
+tt sync
+```
 
-- Exit code `0` means success.
-- Non-zero means the command failed.
-- Validation, database, configuration, and not-found errors should be
-  distinguishable in the message. Numeric exit codes may be standardized later.
+Invoke an OpenTodo synchronization operation only if the documented CLI/API
+provides one. If OpenTodo synchronizes automatically and has no explicit sync
+command, display the appropriate guidance instead of inventing one.
 
-## 11. SQLite and implementation requirements
+## 7. Offline behavior
 
-- Use parameterized SQL.
-- Enable foreign-key enforcement.
-- Use transactions for operations that modify an entry and its tags.
-- Apply schema migrations in a transaction where possible.
-- Store no essential state only in memory; a running timer must survive process
-  exit and machine restart.
-- Do not hold a long-running database lock while a timer is active.
-- If two CLI processes attempt to start a timer concurrently, database
-  constraints or a transaction must prevent two active timers from being
-  created.
-- Provide a useful message if the database file cannot be created or opened.
-- Do not delete or overwrite an existing database during initialization.
+Offline behavior is a capability to verify, not an assumption.
 
-## 12. Validation and edge cases
+### Read and report behavior
 
-The implementation must handle:
+- If OpenTodo's supported CLI provides access to locally cached entries while
+  offline, `tt log` and reports may use that data.
+- Clearly indicate that the report is based on local data and may not include
+  changes from other devices.
+- If offline reads are unavailable, report that the configured OpenTodo client
+  is unreachable.
 
-- Empty or whitespace-only descriptions
-- Invalid UUIDs and ambiguous ID prefixes
-- Invalid dates, timestamps, durations, tags, and project names
-- End times before or equal to start times
-- Attempting to stop when no timer is running
-- Attempting to start when a timer is already running
-- Overlap detection across date boundaries
-- Running entries in lists and reports
-- Edits that would create an invalid duration or overlap
-- Missing or invalid timezone configuration
-- Daylight-saving ambiguous and nonexistent local times
-- Deleted entries being excluded from normal queries and reports
-- Concurrent CLI invocations
+### Start and stop behavior
 
-## 13. Testing requirements
+- Permit offline start or stop only if the documented OpenTodo client supports
+  that operation offline and synchronizes it safely later.
+- Test that a completed offline action appears in OpenTodo after reconnection.
+- Verify how duplicate submissions, multiple offline timers, and conflicting
+  changes are handled.
+- If offline writes are not supported, fail clearly; do not create an unrelated
+  local entry that appears synchronized.
+
+### No parallel source of truth
+
+The MVP must not create an independent local time-entry database to simulate
+offline tracking. A local cache or temporary state may be added later only if
+the design specifies how it reconciles with OpenTodo and prevents duplicate or
+lost entries.
+
+## 8. OpenTodo adapter
+
+Keep OpenTodo-specific process, API, and output handling behind an adapter.
+
+Suggested conceptual operations:
+
+```text
+start_timer(task_reference, description)
+stop_timer()
+get_running_timer()
+list_time_entries(filters)
+get_sync_status()
+sync()
+```
+
+Only implement operations that correspond to documented and verified
+OpenTodo capabilities. An unsupported operation must return a clear
+“not supported by this OpenTodo version/client” error.
+
+The adapter should:
+
+- Check that the required `ot` client is installed.
+- Detect or validate the configured OpenTodo instance.
+- Check the OpenTodo version when the CLI provides that information.
+- Capture standard output, standard error, and exit status separately.
+- Avoid exposing credentials in logs or error output.
+- Handle timeouts and interrupted commands.
+- Preserve OpenTodo's original error details where safe.
+- Prefer documented structured output over parsing terminal formatting.
+- Have unit tests using a mock process or mock provider.
+
+## 9. Configuration
+
+Configuration is for `tt` behavior and the OpenTodo client location. Do not
+duplicate OpenTodo credentials or sync configuration if OpenTodo already
+manages them.
+
+Example:
+
+```toml
+ot_command = "ot"
+timezone = "America/New_York"
+week_start = "monday"
+report_format = "text"
+```
+
+Settings:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `ot_command` | `ot` | Path or command name for the OpenTodo CLI |
+| `timezone` | OpenTodo setting or system timezone | Timezone used for reports, if supported |
+| `week_start` | OpenTodo setting or `monday` | First day of report week |
+| `report_format` | `text` | Default report format |
+
+Credentials should remain under OpenTodo's supported credential management.
+Do not write secrets to the `tt` configuration file.
+
+## 10. Error handling
+
+The CLI must provide actionable errors for:
+
+- `ot` is missing or cannot be executed
+- Unsupported OpenTodo version or operation
+- OpenTodo instance is unreachable
+- Authentication failure
+- No active timer
+- Invalid task identifier
+- Invalid date range or timestamp
+- Missing historical data required for a report
+- Sync failure or unresolved conflict
+
+The CLI must not claim that an operation succeeded unless the OpenTodo
+operation returned success and the result was interpreted reliably.
+
+## 11. Testing
 
 ### Unit tests
 
-Test at least:
+Test:
 
-- Duration parsing and formatting
-- Timestamp parsing and timezone conversion
-- Week boundary calculation for each possible week-start day
-- Date-range clipping for entries that cross boundaries
-- Overlap detection
-- Tag normalization and duplicate detection
-- Report aggregation and output serialization
+- Command and argument construction
+- Safe handling of descriptions and task IDs
+- Parsing documented structured output
+- Report calculations and date-boundary clipping
+- Timezone and week-boundary behavior
+- Error and exit-status handling
+- Unsupported capability behavior
 
 ### Integration tests
 
-Use a temporary SQLite database to test:
+Use a mock `ot` executable or test provider to verify:
 
-- Database initialization and repeated initialization
-- Start/status/stop lifecycle
-- Starting a second timer is rejected
-- Manual entry creation
-- Entry listing and filters
-- Editing entries and tags
-- Soft deletion
-- Weekly and range reports
-- JSON and CSV output
-- A failed command leaves the database unchanged
-- Two concurrent attempts to start a timer cannot create two active timers
+- Start, stop, status, and list workflows
+- OpenTodo errors are surfaced accurately
+- JSON/CSV output is valid
+- Missing `ot` client is handled cleanly
+- Unsupported commands are not invoked
+- Sync status is not falsely reported as success
 
-Tests that depend on current time should use an injectable clock or another
-deterministic test mechanism.
+If an OpenTodo test instance is available, add opt-in integration tests that
+exercise the documented commands. Do not make ordinary automated tests depend
+on a live service or real user account.
 
-## 14. MVP acceptance criteria
+### Offline acceptance tests
 
-The MVP is complete when a user can:
+Before claiming offline support, test:
 
-1. Initialize the local database without manual SQL.
-2. Start a timer, close the CLI, reopen it, and still see the running timer.
-3. Stop the timer and see a completed duration.
-4. Add a completed entry with explicit start and end times or a duration.
-5. List and filter entries by date, project, tag, and description.
-6. Edit and soft-delete entries.
-7. Generate a weekly report that respects the configured timezone and week
-   start.
-8. Generate JSON output for entries and reports and CSV output for reports.
-9. Track time with no network connection.
-10. Recover from invalid input without corrupting or partially changing data.
+1. Disconnect the client from the network.
+2. Start or stop a timer using the documented offline-capable client behavior.
+3. Restart the CLI or OpenTodo client, if relevant.
+4. Reconnect.
+5. Confirm the entry appears once in the OpenTodo web interface and on another
+   synchronized client.
+6. Confirm conflicts and failures are visible rather than silently discarded.
 
-## 15. Suggested project layout
+## 12. Acceptance criteria
 
-This is a suggestion, not a requirement:
+The MVP is complete when:
 
-```text
-cmd/
-  tt/
-internal/
-  cli/
-  config/
-  database/
-  entries/
-  reports/
-  timeutil/
-migrations/
-tests/
-README.md
-SPEC.md
-```
+1. `tt` uses only documented OpenTodo interfaces.
+2. Starting and stopping timers changes the same time-tracking data visible in
+   OpenTodo's web interface.
+3. The compatibility document records tested OpenTodo version and capabilities.
+4. `tt` provides a useful status view for the running timer.
+5. Weekly reports work using a documented OpenTodo query/export/reporting
+   capability, or the CLI clearly reports the limitation.
+6. Sync status is reported accurately when OpenTodo exposes it.
+7. No separate authoritative time-entry database is created.
+8. Offline behavior is either tested and supported, or explicitly reported as
+   unavailable.
+9. Failures do not result in misleading success messages or lost data.
 
-Keep command parsing, business rules, persistence, and formatting separate.
-Business logic such as overlap detection and report aggregation should be
-testable without invoking the CLI.
+## 13. Implementation sequence
 
-
+1. Read the OpenTodo CLI and time-tracking documentation.
+2. Create `docs/opentodo-compatibility.md` with confirmed commands, output
+   formats, offline behavior, and reporting capabilities.
+3. Install or configure the supported OpenTodo CLI and manually test the
+   documented time-tracking workflow.
+4. Build a small adapter that performs only start, stop, and status.
+5. Add listing and weekly reports based on documented data access.
+6. Add JSON/CSV output where structured data is available.
+7. Test synchronization through the OpenTodo web interface and another
+   supported client.
+8. Add offline behavior only after it passes the acceptance tests above.
