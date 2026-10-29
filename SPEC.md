@@ -2,8 +2,10 @@
 
 ## 1. Purpose
 
-Build a Rust or Go command-line client that makes OpenTodo time tracking fast
-and convenient from a terminal.
+Build a Go command-line client that makes OpenTodo time tracking fast and
+convenient from a terminal. OpenTodo's own `ot` client is written in Go, so a
+Go implementation keeps `tt` and `ot` in one toolset: one toolchain builds
+both, and one container image can ship both.
 
 OpenTodo is the system of record for tasks and time entries. The CLI uses
 OpenTodo's documented command-line interface or another officially documented
@@ -63,25 +65,17 @@ confirmed in the documentation.
 
 ## 4. Architecture
 
-```text
-┌──────────────────┐
-│ User             │
-└────────┬─────────┘
-         │
-         ├─────────────────────┐
-         ▼                     ▼
-┌──────────────────┐  ┌──────────────────────┐
-│ `tt` CLI         │  │ OpenTodo web UI      │
-│ Rust or Go       │  │ tasks and time data  │
-└────────┬─────────┘  └──────────┬───────────┘
-         │                       │
-         │ documented interface  │
-         └──────────┬────────────┘
-                    ▼
-           ┌───────────────────┐
-           │ OpenTodo          │
-           │ data and sync     │
-           └───────────────────┘
+```mermaid
+flowchart TD
+    user([User])
+    tt["tt CLI (Go)"]
+    web["OpenTodo web UI<br/>tasks and time data"]
+    opentodo[("OpenTodo<br/>data and sync")]
+
+    user --> tt
+    user --> web
+    tt -- documented interface --> opentodo
+    web -- documented interface --> opentodo
 ```
 
 The CLI should use the documented `ot` command-line client where suitable.
@@ -100,7 +94,7 @@ records somewhere else.
 
 ### Included
 
-- A Rust or Go CLI named `tt` (working name).
+- A Go CLI named `tt` (working name).
 - Integration with documented OpenTodo time-tracking operations.
 - Convenient start, stop, status, and listing commands.
 - Weekly and date-range reports, if supported by OpenTodo or safely derivable
