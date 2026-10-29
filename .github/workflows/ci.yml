@@ -1,0 +1,134 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Only the newest run per branch or PR matters.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --locked --all-targets
+
+      - name: Test
+        run: cargo test --locked
+
+      # The suite must never reach a real OpenTodo server (SPEC.md §11). The
+      # live tests are #[ignore]d; this proves they still are, so a dropped
+      # attribute fails here instead of in someone's account.
+      - name: Live tests must stay opt-in
+        run: |
+          output=$(cargo test --locked --test live 2>&1)
+          echo "$output"
+          if ! echo "$output" | grep -qE '0 passed; 0 failed; [1-9][0-9]* ignored'; then
+            echo "::error::tests/live.rs ran against a server, or has no ignored tests."
+            echo "::error::Every live test must carry #[ignore]."
+            exit 1
+          fi
+
+      - name: Shell scripts parse
+        run: |
+          for script in testing/*.sh; do
+            bash -n "$script" || exit 1
+          done
+
+  msrv:
+    name: Minimum supported Rust (1.88)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Matches `rust-version` in Cargo.toml. 1.88 is the first release with
+      # let chains in edition 2024, which src/ot/model.rs and src/main.rs use.
+      - uses: dtolnay/rust-toolchain@1.88.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+
+      - run: cargo check --locked --all-targets
+
+  lint:
+    name: Format and clippy (advisory)
+    runs-on: ubuntu-latest
+    # Advisory for now: this code has not been through rustfmt or clippy yet,
+    # so a first green run is needed before these can block a merge. Once this
+    # job passes cleanly, delete this line to make it required.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: lint
+
+      - name: rustfmt
+        run: cargo fmt --all --check
+
+      - name: clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+  release:
+    name: Release build
+    # Only after the checks that can block: a release artifact is never built
+    # from code that failed its tests.
+    needs: [test, msrv]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+
+      - name: Build
+        run: cargo build --locked --release
+
+      - name: Smoke-test the binary
+        run: |
+          ./target/release/tt --version
+          ./target/release/tt --help > /dev/null
+          # With no OpenTodo client present, tt must fail cleanly with exit 7
+          # rather than panicking or claiming success.
+          set +e
+          ./target/release/tt --ot-command /nonexistent/ot status
+          code=$?
+          set -e
+          if [ "$code" -ne 7 ]; then
+            echo "::error::expected exit 7 for a missing ot client, got $code"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tt-linux-x86_64
+          path: target/release/tt
+          if-no-files-found: error
+          retention-days: 30

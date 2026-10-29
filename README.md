@@ -1,232 +1,244 @@
-# tt — local-first command-line time tracker
+# tt — terminal time tracking for OpenTodo
 
-A fast, text-oriented time tracker inspired by [klog](https://klog.jotaen.net).
-Everything lives in a local SQLite database; no network access is ever needed.
+`tt` is a small Rust CLI that makes [OpenTodo](https://open-todo.app) time
+tracking fast from a terminal. It starts and stops timers, lists entries, and
+produces weekly and date-range reports.
 
-Built to [`SPEC.md`](SPEC.md). This is the MVP: tracking, entry management, and
-reporting on one machine. There is no server, sync, daemon, or GUI — but the
-records carry UUIDs, revisions, and deletion tombstones so synchronization can
-be added later without reshaping the data.
+**OpenTodo owns the data.** `tt` is a front end for the documented `ot`
+command-line client: it runs `ot` with an argument vector, reads its documented
+`--json` output, and keeps no time-entry storage of its own. Everything `tt`
+writes shows up in the OpenTodo web interface and on your other devices,
+because it is the same data.
 
-## Build
+Built against `SPEC.md`. What `ot` is documented to do, and what that means for
+`tt`, is recorded in [`docs/opentodo-compatibility.md`](docs/opentodo-compatibility.md).
 
-```sh
-cargo build --release     # binary at target/release/tt
-cargo test                # 104 unit and integration tests
+## Honest limitations, up front
+
+| | |
+|---|---|
+| **Offline** | Not supported, at all. The `ot` client is documented as online-only and keeps no local copy, so `tt` cannot start, stop, or list entries without a reachable server. It fails with exit 4 rather than queueing anything. |
+| **Sync status** | `ot` exposes none. `tt sync status` says so and reports server reachability separately; it never claims "synchronized". `tt sync` exits 6 — OpenTodo documents no sync command for tasks or time. |
+| **Reports** | OpenTodo has no CLI reporting command, so `tt` computes reports from `ot time list` data and tells you when a result may be incomplete. |
+| **Verification** | The adapter is built from OpenTodo's documentation and tested against a mock `ot`. It has **not** been run against a live OpenTodo server; [`docs/live-check.md`](docs/live-check.md) is the checklist for doing that. |
+
+## Requirements
+
+- Rust 1.85 or later (edition 2024)
+- The OpenTodo CLI, version 0.9.0 or later, signed in:
+
+  ```bash
+  go install github.com/pixari/opentodo/cmd/ot@latest
+  ot login https://todo.example.com
+  ```
+
+`tt` stores no credentials and no server URL. Authentication, profiles and
+instance selection stay with `ot` (`ot auth status`, `OPENTODO_URL`,
+`OPENTODO_TOKEN`, `--profile`).
+
+## Install
+
+```bash
+cargo install --path .
 ```
 
-SQLite is compiled in, so there is no system database dependency.
+## Usage
 
-## Quick start
+### Start and stop
 
-```sh
-tt start "Implement login" --project app --tag focus
-tt status
+```bash
+tt start "Design review" --task 8c2a   # the text becomes the entry's note
+tt start --task 8c2a                   # no note
+tt start "Design review"               # picks a task interactively, in a terminal
 tt stop
+tt status
+tt status --json
+```
 
-tt add "Code review" --start 2026-10-27T09:00 --duration 90m --project alpha
+OpenTodo attaches every time entry to a task, so a task is always required.
+Run from a terminal without `--task` and `tt` lists your tasks and asks; in a
+script, `--task` is mandatory and `tt` says so instead of guessing.
+
+OpenTodo runs one timer at a time and ends the current entry when another
+starts. `tt start` refuses when something is already running unless you pass
+`--switch`, so nothing is closed by accident.
+
+`tt stop` checks what is running before writing. If nothing is, it exits 8 and
+sends nothing to OpenTodo.
+
+### Listing entries
+
+```bash
+tt log                                      # the last 7 days
 tt log --today
+tt log --from 2026-10-20 --to 2026-10-27
+tt log --task 8c2a
+tt log --format json
+```
+
+### Reports
+
+```bash
 tt report week
+tt report week --week 2026-10-27          # any date inside the week
+tt report week --week-start sunday
+tt report week --format json
+tt report range --from 2026-10-01 --to 2026-10-31 --format csv
 ```
 
-## Commands
+A report shows the date range, the total, daily totals, duration by task,
+untasked time, and a note whenever a timer is still running or the data may be
+incomplete. Text, JSON and CSV all carry that incompleteness flag.
 
-| Command | Purpose |
-|---|---|
-| `tt init` | Create the database and apply migrations (safe to repeat) |
-| `tt start DESC` | Start a timer — `--project`, `--tag`, `--at`, `--allow-overlap` |
-| `tt stop` | Stop the running timer — `--at`, `--allow-overlap` |
-| `tt status` | Show the running timer — `--json` |
-| `tt add DESC` | Record a completed entry — `--start` plus `--end` or `--duration` |
-| `tt log` | List entries, newest first — filters below |
-| `tt show ID` | Show one entry — `--json`, `--include-deleted` |
-| `tt edit ID` | Change an entry — see below |
-| `tt delete ID` | Soft-delete an entry — `--yes` |
-| `tt report week` | Weekly summary — `--week`, `--project`, `--tag`, `--format` |
-| `tt report range` | Date-range summary — `--from`, `--to`, `--project`, `--tag`, `--format` |
-| `tt config show\|set\|path` | Inspect or change configuration |
+```text
+Week of 2026-10-26 to 2026-11-01 (week starts monday, America/New_York)
+-----------------------------------------------------------------------
+Total: 3h 30m
 
-`tt log` filters: `--today`, `--from DATE`, `--to DATE`, `--project`, `--tag`,
-`--search TEXT`, `--limit N`, `--json`. `--today` cannot be combined with
-`--from` or `--to`. A date range is inclusive, and an entry is included if any
-part of it falls inside.
+By day
+  Mon 2026-10-26    1h 00m
+  Tue 2026-10-27    2h 00m
+  Wed 2026-10-28       30m
+  ...
 
-`tt edit` options: `--description`, `--project` / `--clear-project`, `--start`,
-`--end`, `--tag` (replaces all tags), `--add-tag`, `--remove-tag`,
-`--allow-overlap`. At least one is required. Edits are validated against the
-resulting entry as a whole; a failed edit changes nothing.
-
-Every command supports `--help`. Shell completion (`tt completion`, optional in
-the spec) is not implemented.
-
-## Tags
-
-Tags can be given either way, and the two merge:
-
-```sh
-tt start "Investigate alert" --tag incident --tag oncall
-tt start "Investigate #incident while #on-call"
+By task
+    2h 00m  Design review (Work)  [8c2a]
+    1h 30m  Planning (Work)  [3f1d]
 ```
 
-A `#tag` written in the description is mirrored into the entry's tag list; the
-`#` text stays in the description. Duplicates are detected case-insensitively
-and the first spelling entered is kept for display. `tt edit --description`
-likewise adds any `#tags` in the new text, and an explicit `--remove-tag` wins
-over them.
+### Sync
 
-## Files and precedence
+```bash
+tt sync status
+tt sync status --json
+```
 
-| What | Default location |
-|---|---|
-| Database | `$XDG_DATA_HOME/tt/tt.db`, else `~/.local/share/tt/tt.db` |
-| Configuration | `$XDG_CONFIG_HOME/tt/config.toml`, else `~/.config/tt/config.toml` |
+OpenTodo's sync indicator lives in its app, not in `ot`. `tt sync status`
+reports three separate things and never conflates them: sync state (always
+*unavailable*), whether the server could be reached, and whether local changes
+could be pending (they cannot — `ot` has no local queue).
 
-macOS and Windows use their own standard application-data directories.
+## Timezones and week boundaries
 
-If `timezone` is unset, the system timezone is used. Its IANA name is recovered
-from `$TZ` or `/etc/timezone` when the operating system does not report one
-directly (common in containers); if no name can be determined, times are still
-correct but a warning suggests setting `timezone` explicitly, since each entry
-records the zone it was created in.
+Day and week boundaries are `tt`'s own, computed in the configured timezone
+from the absolute timestamps OpenTodo returns. Every report prints the timezone
+and week start it used.
 
-- **Database path:** `--db PATH` wins, then `$TT_DB`, then the default.
-- **Config path:** `$TT_CONFIG` wins, then the default.
-
-The database is created on first use; `tt init` is optional. Opening an
-existing database never deletes or overwrites it.
+This matters because the `ot` CLI has no documented `--tz` flag, so `tt` does
+not depend on how `ot` interprets `--from`/`--to`. It asks for a window one day
+wider on each side and clips entries itself. An entry crossing local midnight
+is split across both days, and daily totals always sum to the period total,
+including across daylight-saving changes.
 
 ## Configuration
 
-`config.toml`, every setting optional:
+Optional, at `~/.config/tt/config.toml` (override with `TT_CONFIG`):
 
 ```toml
-timezone = "America/New_York"   # default: the system timezone
-week_start = "monday"           # default: monday; any weekday
-duration_precision = "minute"   # default: minute; or "second"
-default_project = ""            # default: none
+ot_command = "ot"
+timezone = "America/New_York"
+week_start = "monday"
+report_format = "text"
 ```
 
-Set values with `tt config set timezone America/New_York`, which validates
-before writing and leaves other keys (including unrecognized ones) intact. An
-invalid setting is a fatal error naming the setting and the file; an unknown
-key is ignored with a warning on stderr.
+| Setting | Default | Meaning |
+|---|---|---|
+| `ot_command` | `ot` | Path or command name for the OpenTodo CLI |
+| `timezone` | system timezone | Timezone for day and week boundaries. `ot` exposes no timezone setting, so there is nothing to inherit. |
+| `week_start` | `monday` | First day of a report week. `ot` exposes no week-start setting either. |
+| `report_format` | `text` | Default report format: `text`, `json` or `csv` |
+| `timeout_seconds` | `30` | How long to wait for an `ot` command before killing it |
+| `max_entries` | `5000` | `--limit` for `ot time list`; a result that fills it is reported as incomplete |
+| `version_check` | `true` | Run `ot version --json` before other calls |
 
-## Time handling
+Unknown keys are rejected, so a credential cannot be left here by mistake.
+`--ot-command` and `--timezone` override the file for one run.
 
-**Accepted input.** `--at`, `--start`, and `--end` take:
+## Exit codes
 
-| Form | Meaning |
-|---|---|
-| `2026-10-27T09:30` | Local time in the configured timezone (seconds optional) |
-| `2026-10-27 09:30` | The same, with a space separator |
-| `2026-10-27T09:30-04:00` | An explicit offset — unambiguous |
-| `2026-10-27T13:30:00Z` | UTC — unambiguous |
-
-`--from` and `--to` take calendar dates, `YYYY-MM-DD`, in the configured
-timezone.
-
-**Daylight saving.** A local time without an offset that is *ambiguous* (it
-occurs twice) or *nonexistent* (it was skipped) is rejected with an explanation
-and a suggested replacement you can paste back verbatim. Supply an explicit
-offset to say which you meant.
-
-**Durations.** Integers with `h`, `m`, `s` units, combinable: `45s`, `90m`,
-`1h30m`, `1h30m15s`.
-
-**Storage and display.** Instants are stored as UTC RFC 3339 strings at whole-
-second precision (`2026-10-27T13:30:00Z`) — one format, never mixed. Display
-and all calendar reasoning use the configured timezone, in the format
-`YYYY-MM-DD HH:MM` (gaining `:SS` under `duration_precision = "second"`).
-Durations render as `1h 30m` (`1h 30m 15s` at second precision). Rounding is
-applied only when rendering text; stored instants and report aggregates are
-never rounded.
-
-Because durations are elapsed time between real instants, a day containing a
-daylight-saving transition can legitimately total 23 or 25 hours.
-
-## Overlap
-
-At most one timer runs at a time, enforced by a database constraint rather
-than by a check alone — two CLI processes racing to start a timer cannot both
-win. Entries may not overlap each other unless `--allow-overlap` is given; a
-running timer counts as occupying all time from its start onward. Overlaps that
-were explicitly allowed remain visible: reports list the overlapping pairs and
-warn that time is counted more than once.
-
-## Output
-
-Results go to stdout, diagnostics and warnings to stderr. `--json` and
-`--format json` emit nothing but the JSON document, so they are safe to pipe.
-
-- **JSON** uses stable field names, full UUIDs, integer-second durations,
-  UTC timestamps ending in `Z` alongside local ones with an explicit offset,
-  and deterministic array order. `tt status --json` prints `null` when no timer
-  is running.
-- **CSV** (reports only) is long-format: `period_start,period_end,group_type,
-  group_name,seconds`, with `group_type` one of `total`, `project`, `day`, `tag`.
-- **Text** list output shows a short 8-character id; `show` and JSON give the
-  full UUID.
-
-### Exit status
+1–5 mirror `ot`'s own, so a wrapper script can treat them the same way.
 
 | Code | Meaning |
 |---|---|
 | 0 | Success |
-| 2 | Invalid input (bad times, durations, flags, or a missing confirmation) |
-| 3 | Entry not found |
-| 4 | Conflict (overlap, a timer already running, an ambiguous id prefix) |
-| 5 | Configuration error |
-| 6 | Database error |
+| 1 | OpenTodo rejected the request or failed |
+| 2 | Usage or validation error |
+| 3 | Authentication or configuration problem |
+| 4 | OpenTodo server unreachable — **nothing was recorded anywhere** |
+| 5 | Not permitted (read-only token, read-only mode) |
+| 6 | The operation has no documented OpenTodo equivalent |
+| 7 | The `ot` client is missing, unusable, or did not finish |
+| 8 | No timer is running |
 
-## Data model
+`tt` never reports success that OpenTodo did not confirm. When `ot` returns no
+usable detail — its `time start` and `time stop` JSON is undocumented — `tt`
+re-reads the entry, and if that fails it says what it does not know rather than
+printing a duration it computed itself.
 
-`entries` holds `id` (UUID), `start_at`, `end_at` (null while running),
-`description`, `project`, `created_at`, `updated_at`, `revision`, `deleted_at`,
-and the `timezone` in effect when the entry was created. `entry_tags` holds
-`(entry_id, tag)`, unique per entry case-insensitively.
+## Development
 
-Deleting is a soft delete: `deleted_at` is set, the revision increments, and
-the row stays as a tombstone. Normal listings and reports exclude it;
-`tt show --include-deleted` can still inspect it.
-
-Schema changes are applied as numbered migrations inside a transaction and
-recorded in `schema_migrations`.
-
-## Testing
-
-```sh
-cargo test
+```bash
+cargo test          # 117 tests: unit plus integration
+cargo build --release
 ```
 
-Unit tests cover duration and timestamp parsing, timezone conversion, week
-boundaries for every week-start day, range clipping, overlap detection, tag
-normalization, and report aggregation. Integration tests drive the real binary
-against a temporary database: the start/stop lifecycle across separate
-processes, rejected second timers, filters, edits, soft deletion, reports, JSON
-and CSV output, failed commands leaving the database untouched, and eight
-concurrent `tt start` invocations producing exactly one running timer.
+Integration tests run the real `tt` binary against a mock `ot` executable that
+answers only the commands a test installs. Anything else fails with
+`unexpected_command`, so an invented `ot` subcommand breaks the suite. `TT_NOW`
+pins the clock so report periods and elapsed times are deterministic.
 
-Tests that depend on the current time pin it with the `TT_NOW` environment
-variable, which accepts an RFC 3339 timestamp and freezes "now" for a single
-invocation. It exists for deterministic testing, not for recording time.
+### Testing against a real OpenTodo server
 
-## Layout
+[`testing/`](testing/) has a container, sample data, and nine opt-in tests that
+run `tt` against a live instance — the ones that can actually close the
+unverified items in the compatibility document:
+
+```bash
+cd testing && docker compose up -d   # then create the owner account in a browser
+ot login --profile tt-test http://localhost:8080
+export OPENTODO_PROFILE=tt-test
+./seed.sh                            # sample tasks and 3h45m of known time
+./run-live-tests.sh
+```
+
+Those tests carry `#[ignore]`, so `cargo test` never touches a server, and CI
+asserts they stayed that way. See [`testing/README.md`](testing/README.md).
+
+### Continuous integration
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every pull
+request and on pushes to `main`:
+
+| Job | Blocking | What it does |
+|---|---|---|
+| `test` | yes | Builds, runs all 117 tests, verifies the live tests are still opt-in, parses the shell scripts |
+| `msrv` | yes | `cargo check` on Rust 1.88, the version `rust-version` claims |
+| `lint` | no, for now | `cargo fmt --check` and `cargo clippy -D warnings` |
+| `release` | — | Only on `main`, only after `test` and `msrv` pass: builds the release binary, smoke-tests it, uploads it as an artifact |
+
+`lint` is advisory because this code has not been through rustfmt or clippy
+yet; drop its `continue-on-error` once it is green.
+
+[`.github/workflows/live.yml`](.github/workflows/live.yml) is manual only
+(Actions → Run workflow). It starts the real OpenTodo image and checks
+`/healthz`, captures `ot schema` as an artifact for updating the compatibility
+document, and — if you point the `OPENTODO_URL` and `OPENTODO_TOKEN` secrets at
+a throwaway instance — runs the live tests.
 
 ```text
 src/
-  main.rs        entry point, error reporting, exit codes
-  cli.rs         argument parsing and command dispatch
-  config.rs      TOML configuration and path resolution
-  db.rs          connection setup and schema migrations
-  model.rs       Entry type, description/project/tag normalization
-  entries.rs     persistence and business rules (overlap, lifecycle, editing)
-  reports.rs     period calculation and aggregation
-  timeutil.rs    parsing, formatting, timezone and week arithmetic
-  output.rs      text, JSON, and CSV rendering
-  clock.rs       injectable clock
-tests/           integration tests driving the binary
+  main.rs         wiring and exit codes
+  cli.rs          command-line surface
+  config.rs       settings
+  clock.rs        injectable "now"
+  report.rs       periods, timezone clipping, aggregation
+  output.rs       text, JSON and CSV rendering
+  commands/       one module per command group
+  ot/             the OpenTodo adapter — the only code that knows about `ot`
+    mod.rs        operations, argument construction, exit-code mapping
+    model.rs      documented JSON shapes
+    runner.rs     process execution, timeouts, mock runner
+    redact.rs     credential scrubbing for anything `ot` prints
 ```
 
-Business rules are testable without invoking the CLI: `entries` and `reports`
-take plain values and a `Connection`, and know nothing about argument parsing
-or formatting.
+Nothing outside `src/ot/` knows that `ot` exists.

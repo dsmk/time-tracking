@@ -1,199 +1,168 @@
+//! Start, stop and status against a mock `ot`.
+
 mod support;
 
-use support::Harness;
+use support::{Harness, entry, ms};
 
-/// Tuesday 09:00 America/New_York.
-const T0900: &str = "2026-10-27T13:00:00Z";
-const T1030: &str = "2026-10-27T14:30:00Z";
-const T1200: &str = "2026-10-27T16:00:00Z";
+const NOW: &str = "2026-10-28T18:00:00Z"; // Wed 14:00 America/New_York
 
-#[test]
-fn init_creates_the_database_and_is_safe_to_repeat() {
-    let h = Harness::new();
-    let first = h.ok(T0900, &["init"]);
-    assert!(first.contains("schema version 1"), "{first}");
-    assert!(h.db.exists(), "init must create the database file");
+fn running_entry() -> String {
+    entry("e9", "8c2a", "Design review", ms("2026-10-28T17:00:00Z"), None)
+}
 
-    // Put a row in, then re-initialize: nothing may be lost.
-    h.ok(T0900, &["add", "Keep me", "--start", "2026-10-27T09:00", "--duration", "30m"]);
-    let second = h.ok(T1030, &["init"]);
-    assert!(second.contains("schema version 1"), "{second}");
-    assert_eq!(h.json(T1030, &["log", "--json"]).as_array().unwrap().len(), 1);
+fn stopped_entry() -> String {
+    entry(
+        "e9",
+        "8c2a",
+        "Design review",
+        ms("2026-10-28T17:00:00Z"),
+        Some(ms("2026-10-28T18:00:00Z")),
+    )
 }
 
 #[test]
-fn the_database_is_created_on_demand_without_init() {
+fn start_checks_for_a_running_timer_then_starts_one() {
     let h = Harness::new();
-    h.ok(T0900, &["start", "No init first"]);
-    assert!(h.db.exists());
+    h.respond("time-list", "[]");
+    h.respond("time-start", &running_entry());
+
+    let out = h.ok(NOW, &["start", "Design review", "--task", "8c2a"]);
+    assert!(out.contains("Started"), "{out}");
+    assert!(out.contains("Design review"), "{out}");
+    assert!(out.contains("task 8c2a"), "{out}");
+
+    let calls = h.calls();
+    assert_eq!(calls[0], vec!["version", "--json"]);
+    assert_eq!(calls[1], vec!["time", "list", "--json", "--running"]);
+    assert_eq!(
+        calls[2],
+        vec!["time", "start", "8c2a", "--note=Design review", "--json"],
+        "only documented ot arguments, passed as a vector"
+    );
 }
 
 #[test]
-fn start_status_stop_lifecycle_survives_process_exit() {
+fn start_refuses_to_replace_a_running_timer_without_switch() {
     let h = Harness::new();
+    h.respond("time-list", &format!("[{}]", running_entry()));
 
-    let started = h.ok(T0900, &["start", "Implement login", "--project", "app", "--tag", "focus"]);
-    assert!(started.contains("Started timer"), "{started}");
-
-    // A separate process must still see the running timer: nothing essential
-    // is held in memory.
-    let status = h.json(T1030, &["status", "--json"]);
-    assert_eq!(status["description"], "Implement login");
-    assert_eq!(status["project"], "app");
-    assert_eq!(status["running"], true);
-    assert_eq!(status["end_at"], serde_json::Value::Null);
-    assert_eq!(status["duration_seconds"], 5400, "running time counts through now");
-    assert_eq!(status["start_at"], "2026-10-27T13:00:00Z");
-    assert_eq!(status["timezone"], "America/New_York");
-
-    let stopped = h.ok(T1030, &["stop"]);
-    assert!(stopped.contains("Stopped timer"), "{stopped}");
-    assert!(stopped.contains("1h 30m"), "completed duration is shown: {stopped}");
-
-    // After stopping, no timer is running.
-    assert_eq!(h.ok(T1200, &["status"]).trim(), "No timer running");
-    assert_eq!(h.json(T1200, &["status", "--json"]), serde_json::Value::Null);
-
-    let entry = &h.json(T1200, &["log", "--json"])[0];
-    assert_eq!(entry["running"], false);
-    assert_eq!(entry["end_at"], "2026-10-27T14:30:00Z");
-    assert_eq!(entry["duration_seconds"], 5400);
-    assert_eq!(entry["revision"], 2, "stopping is a mutation");
-}
-
-#[test]
-fn starting_a_second_timer_is_rejected_and_leaves_the_first_alone() {
-    let h = Harness::new();
-    h.ok(T0900, &["start", "First"]);
-
-    let run = h.fail(T1030, &["start", "Second"]);
-    assert_eq!(run.code, 4, "conflicts exit with 4");
+    let run = h.fail(NOW, &["start", "Other work", "--task", "3f1d"]);
+    assert_eq!(run.code, 2);
     assert!(run.stderr.contains("already running"), "{}", run.stderr);
-    assert!(run.stderr.contains("First"), "the error names the running entry: {}", run.stderr);
-
-    // The original timer is untouched, and no second entry was created.
-    let entries = h.json(T1030, &["log", "--json"]);
-    assert_eq!(entries.as_array().unwrap().len(), 1);
-    assert_eq!(h.json(T1030, &["status", "--json"])["description"], "First");
+    assert!(run.stderr.contains("--switch"), "{}", run.stderr);
+    assert_eq!(h.call_count(&["time", "start"]), 0, "no write may be sent");
+    assert!(run.stdout.is_empty(), "a failure must not print results");
 }
 
 #[test]
-fn stopping_without_a_running_timer_fails_clearly() {
+fn start_switch_warns_that_opentodo_will_end_the_current_entry() {
     let h = Harness::new();
-    let run = h.fail(T0900, &["stop"]);
-    assert_eq!(run.code, 4);
+    h.respond("time-list", &format!("[{}]", running_entry()));
+    h.respond("time-start", &entry("e10", "3f1d", "Other work", ms(NOW), None));
+
+    let run = h.run(NOW, &["start", "Other work", "--task", "3f1d", "--switch"]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert!(run.stderr.contains("will end the running entry"), "{}", run.stderr);
+    assert_eq!(h.call_count(&["time", "start"]), 1);
+}
+
+#[test]
+fn start_without_a_task_fails_cleanly_when_there_is_no_terminal() {
+    let h = Harness::new();
+    h.respond("time-list", "[]");
+
+    let run = h.fail(NOW, &["start", "Design review"]);
+    assert_eq!(run.code, 2);
+    assert!(run.stderr.contains("--task"), "{}", run.stderr);
+    assert_eq!(h.call_count(&["time", "start"]), 0);
+    assert_eq!(h.call_count(&["list"]), 0, "no interactive lookup without a terminal");
+}
+
+#[test]
+fn start_json_reports_the_entry_opentodo_returned() {
+    let h = Harness::new();
+    h.respond("time-list", "[]");
+    h.respond("time-start", &running_entry());
+
+    let json = h.json(NOW, &["start", "Design review", "--task", "8c2a", "--json"]);
+    assert_eq!(json["id"], "e9");
+    assert_eq!(json["taskId"], "8c2a");
+    assert_eq!(json["running"], true);
+    assert_eq!(json["startedLocal"], "2026-10-28T13:00:00-04:00");
+}
+
+#[test]
+fn stop_without_a_running_timer_changes_nothing() {
+    let h = Harness::new();
+    h.respond("time-list", "[]");
+
+    let run = h.fail(NOW, &["stop"]);
+    assert_eq!(run.code, 8, "exit 8 means no active timer");
     assert!(run.stderr.contains("no timer is running"), "{}", run.stderr);
+    assert_eq!(h.call_count(&["time", "stop"]), 0, "ot must not be asked to stop nothing");
 }
 
 #[test]
-fn stop_must_be_later_than_start_and_leaves_the_timer_running() {
+fn stop_reports_the_completed_entry() {
     let h = Harness::new();
-    h.ok(T1030, &["start", "Running"]);
+    h.respond("time-list", &format!("[{}]", running_entry()));
+    h.respond("time-stop", &stopped_entry());
 
-    let run = h.fail(T1200, &["stop", "--at", "2026-10-27T09:00"]);
-    assert_eq!(run.code, 2);
-    assert!(run.stderr.contains("later than"), "{}", run.stderr);
-
-    // Still running, still revision 1.
-    let status = h.json(T1200, &["status", "--json"]);
-    assert_eq!(status["running"], true);
-    assert_eq!(status["revision"], 1);
+    let out = h.ok(NOW, &["stop"]);
+    assert!(out.contains("Stopped"), "{out}");
+    assert!(out.contains("1h 00m"), "duration comes from OpenTodo's timestamps: {out}");
+    assert_eq!(h.calls().last().unwrap(), &vec!["time", "stop", "--json"]);
 }
 
 #[test]
-fn start_at_records_a_past_start_and_the_timer_keeps_running() {
+fn stop_rereads_the_entry_when_opentodo_returns_no_details() {
     let h = Harness::new();
-    h.ok(T1200, &["start", "Backdated", "--at", "2026-10-27T09:00"]);
-    let status = h.json(T1200, &["status", "--json"]);
-    assert_eq!(status["start_at"], "2026-10-27T13:00:00Z");
-    assert_eq!(status["running"], true);
-    assert_eq!(status["duration_seconds"], 3 * 3600);
+    // 1: the running check. 2: the re-read after the undocumented stop output.
+    h.respond_nth("time-list", 1, &format!("[{}]", running_entry()));
+    h.respond_nth("time-list", 2, &format!("[{}]", stopped_entry()));
+    h.respond("time-stop", "");
+
+    let out = h.ok(NOW, &["stop"]);
+    assert!(out.contains("1h 00m"), "{out}");
+    let reread = &h.calls_matching(&["time", "list"])[1];
+    assert!(reread.contains(&"--task=8c2a".to_string()), "{reread:?}");
 }
 
 #[test]
-fn concurrent_starts_cannot_create_two_running_timers() {
+fn stop_does_not_invent_a_duration_when_the_entry_cannot_be_reread() {
     let h = Harness::new();
-    // Initialize first so the race is over the timer, not over schema creation.
-    h.ok(T0900, &["init"]);
+    h.respond_nth("time-list", 1, &format!("[{}]", running_entry()));
+    h.respond_nth("time-list", 2, "[]");
+    h.respond("time-stop", "");
 
-    let codes: Vec<i32> = std::thread::scope(|scope| {
-        let handles: Vec<_> = (0..8)
-            .map(|i| {
-                let h = &h;
-                let label = format!("race {i}");
-                scope.spawn(move || {
-                    h.command(T0900, &["start", &label])
-                        .output()
-                        .expect("spawn tt")
-                        .status
-                        .code()
-                        .unwrap_or(-1)
-                })
-            })
-            .collect();
-        handles.into_iter().map(|handle| handle.join().unwrap()).collect()
-    });
-
-    let winners = codes.iter().filter(|c| **c == 0).count();
-    assert_eq!(winners, 1, "exactly one concurrent start may win, got codes {codes:?}");
-
-    // And the database agrees: one entry, one running timer.
-    let entries = h.json(T1030, &["log", "--json"]);
-    assert_eq!(entries.as_array().unwrap().len(), 1, "only one entry may exist");
-    assert_eq!(h.json(T1030, &["status", "--json"])["running"], true);
+    let run = h.run(NOW, &["stop"]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert!(run.stdout.contains("Stopped the timer"), "{}", run.stdout);
+    assert!(run.stderr.contains("no entry details"), "{}", run.stderr);
+    assert!(!run.stdout.contains("1h"), "no duration may be fabricated: {}", run.stdout);
 }
 
 #[test]
-fn delete_requires_confirmation_when_stdin_is_not_a_terminal() {
+fn status_shows_the_running_timer_and_elapsed_time() {
     let h = Harness::new();
-    h.ok(T0900, &["add", "Disposable", "--start", "2026-10-27T09:00", "--duration", "30m"]);
-    let id = h.id_of(T1200, "Disposable");
+    h.respond("time-list", &format!("[{}]", running_entry()));
 
-    let run = h.fail(T1200, &["delete", &id]);
-    assert_eq!(run.code, 2);
-    assert!(run.stderr.contains("--yes"), "{}", run.stderr);
-
-    // Still present and unmodified.
-    let entries = h.json(T1200, &["log", "--json"]);
-    assert_eq!(entries.as_array().unwrap().len(), 1);
-    assert_eq!(entries[0]["revision"], 1);
+    let out = h.ok(NOW, &["status"]);
+    assert!(out.contains("Running"), "{out}");
+    assert!(out.contains("1h 00m"), "{out}");
+    assert!(out.contains("13:00"), "local start time: {out}");
 }
 
 #[test]
-fn soft_delete_hides_the_entry_but_keeps_the_row() {
+fn status_is_concise_and_json_shaped_when_nothing_runs() {
     let h = Harness::new();
-    h.ok(T0900, &["add", "Disposable", "--start", "2026-10-27T09:00", "--duration", "30m"]);
-    let id = h.id_of(T1200, "Disposable");
+    h.respond("time-list", "[]");
 
-    let out = h.ok(T1200, &["delete", &id, "--yes"]);
-    assert!(out.contains("Deleted entry"), "{out}");
+    assert!(h.ok(NOW, &["status"]).contains("No timer is running"));
 
-    // Gone from normal listings, reports, and show.
-    assert_eq!(h.json(T1200, &["log", "--json"]).as_array().unwrap().len(), 0);
-    let report = h.json(T1200, &["report", "week", "--format", "json"]);
-    assert_eq!(report["total_seconds"], 0);
-    let run = h.fail(T1200, &["show", &id]);
-    assert_eq!(run.code, 3);
-    assert!(run.stderr.contains("deleted"), "{}", run.stderr);
-
-    // The row survives as a tombstone, with a bumped revision.
-    let shown = h.json(T1200, &["show", &id, "--json", "--include-deleted"]);
-    assert_eq!(shown["id"], id.as_str());
-    assert_ne!(shown["deleted_at"], serde_json::Value::Null);
-    assert_eq!(shown["revision"], 2);
-}
-
-#[test]
-fn deleting_a_running_timer_says_the_time_is_discarded() {
-    let h = Harness::new();
-    h.ok(T0900, &["start", "Mistake"]);
-    let id = h.id_of(T1030, "Mistake");
-
-    let out = h.ok(T1030, &["delete", &id, "--yes"]);
-    assert!(out.contains("Discarded the running timer"), "{out}");
-    assert!(out.contains("not recorded"), "{out}");
-
-    // The timer slot is free again.
-    assert_eq!(h.json(T1030, &["status", "--json"]), serde_json::Value::Null);
-    h.ok(T1030, &["start", "Fresh start"]);
+    let h2 = Harness::new();
+    h2.respond("time-list", "[]");
+    let json = h2.json(NOW, &["status", "--json"]);
+    assert_eq!(json["running"], false);
+    assert!(json["entry"].is_null());
 }

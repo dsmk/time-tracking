@@ -4,365 +4,232 @@ use jiff::civil::Weekday;
 use jiff::tz::TimeZone;
 use serde::Deserialize;
 
-use crate::error::{AppError, ErrorKind, Result, config as config_err};
-use crate::timeutil::{Precision, parse_weekday, tz_name, weekday_name};
+use crate::error::{Result, usage};
 
-/// Keys recognised in `config.toml`. Anything else is ignored with a warning.
-const KNOWN_KEYS: [&str; 4] =
-    ["timezone", "week_start", "duration_precision", "default_project"];
-
-#[derive(Debug, Deserialize, Default)]
-struct RawConfig {
-    timezone: Option<String>,
-    week_start: Option<String>,
-    duration_precision: Option<String>,
-    default_project: Option<String>,
+/// Default output format for reports and listings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Format {
+    Text,
+    Json,
+    Csv,
 }
 
-/// Effective configuration: every setting resolved, with defaults applied.
+impl std::str::FromStr for Format {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Format, String> {
+        match s.to_ascii_lowercase().as_str() {
+            "text" => Ok(Format::Text),
+            "json" => Ok(Format::Json),
+            "csv" => Ok(Format::Csv),
+            other => Err(format!("unknown format {other:?}, expected text, json, or csv")),
+        }
+    }
+}
+
+/// `tt` settings. Deliberately small: anything about *which* OpenTodo instance
+/// to talk to, or how to authenticate to it, stays in `ot`'s own configuration
+/// (see `docs/opentodo-compatibility.md` §8). Unknown keys are rejected so a
+/// stray `token = "..."` fails loudly instead of sitting in a plaintext file.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct RawConfig {
+    pub ot_command: String,
+    pub timezone: Option<String>,
+    pub week_start: String,
+    pub report_format: String,
+    /// Seconds to wait for an `ot` invocation before killing it. Above `ot`'s
+    /// own documented 15 s server timeout so its error wins the race.
+    pub timeout_seconds: u64,
+    /// `--limit` passed to `ot time list`. Results that hit it are reported as
+    /// incomplete rather than quietly truncated.
+    pub max_entries: u32,
+    /// Run `ot version --json` before other calls.
+    pub version_check: bool,
+}
+
+impl Default for RawConfig {
+    fn default() -> RawConfig {
+        RawConfig {
+            ot_command: "ot".to_string(),
+            timezone: None,
+            week_start: "monday".to_string(),
+            report_format: "text".to_string(),
+            timeout_seconds: 30,
+            max_entries: 5000,
+            version_check: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub ot_command: String,
     pub timezone: TimeZone,
+    /// Where the timezone came from, for report footers.
+    pub timezone_source: TimezoneSource,
     pub week_start: Weekday,
-    pub precision: Precision,
-    pub default_project: Option<String>,
-    pub path: PathBuf,
-    /// Non-fatal problems to report on stderr (unknown keys, and so on).
-    pub warnings: Vec<String>,
+    pub report_format: Format,
+    pub timeout_seconds: u64,
+    pub max_entries: u32,
+    pub version_check: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimezoneSource {
+    Config,
+    System,
 }
 
 impl Config {
-    pub fn timezone_name(&self) -> String {
-        tz_name(&self.timezone)
-    }
-
-    /// Load configuration, falling back to defaults when the file is absent.
+    /// Resolve the config path, read it if present, and validate it.
+    ///
+    /// `TT_CONFIG` overrides the path; a missing file is not an error, but a
+    /// missing file at an explicitly requested path is.
     pub fn load() -> Result<Config> {
-        let path = config_path()?;
-        Config::load_from(&path)
-    }
-
-    pub fn load_from(path: &Path) -> Result<Config> {
-        let mut warnings = Vec::new();
-        let raw = match std::fs::read_to_string(path) {
-            Ok(text) => text,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(err) => {
-                return Err(config_err(format!(
-                    "cannot read {}: {err}",
-                    path.display()
-                )));
-            }
-        };
-
-        let table: toml::Table = raw.parse().map_err(|e| {
-            config_err(format!("{} is not valid TOML: {e}", path.display()))
-        })?;
-        for key in table.keys() {
-            if !KNOWN_KEYS.contains(&key.as_str()) {
-                warnings.push(format!(
-                    "unknown setting {key:?} in {} was ignored",
-                    path.display()
-                ));
-            }
-        }
-
-        let parsed: RawConfig = table.try_into().map_err(|e| {
-            config_err(format!("{} has an invalid value: {e}", path.display()))
-        })?;
-
-        let timezone = match parsed.timezone.as_deref().map(str::trim) {
-            Some(name) if !name.is_empty() => TimeZone::get(name).map_err(|_| {
-                setting_error(path, "timezone", name, "not a known IANA timezone name")
-                    .with_hint("example: timezone = \"America/New_York\"")
-            })?,
-            _ => {
-                let (tz, warning) = system_timezone();
-                warnings.extend(warning);
-                tz
-            }
-        };
-
-        let week_start = match parsed.week_start.as_deref().map(str::trim) {
-            Some(name) if !name.is_empty() => parse_weekday(name).map_err(|_| {
-                setting_error(path, "week_start", name, "not a weekday name").with_hint(
-                    "use one of: monday, tuesday, wednesday, thursday, friday, saturday, sunday",
-                )
-            })?,
-            _ => Weekday::Monday,
-        };
-
-        let precision = match parsed.duration_precision.as_deref().map(str::trim) {
-            Some("minute") | None | Some("") => Precision::Minute,
-            Some("second") => Precision::Second,
-            Some(other) => {
-                return Err(setting_error(
-                    path,
-                    "duration_precision",
-                    other,
-                    "not a supported precision",
-                )
-                .with_hint("use \"minute\" or \"second\""));
-            }
-        };
-
-        let default_project = parsed
-            .default_project
-            .map(|p| p.trim().to_string())
-            .filter(|p| !p.is_empty());
-
-        Ok(Config { timezone, week_start, precision, default_project, path: path.to_path_buf(), warnings })
-    }
-
-    /// Validate and persist a single setting, preserving other keys and any
-    /// unknown keys already present in the file.
-    pub fn set(path: &Path, key: &str, value: &str) -> Result<()> {
-        if !KNOWN_KEYS.contains(&key) {
-            return Err(config_err(format!("unknown setting {key:?}")).with_hint(format!(
-                "known settings: {}",
-                KNOWN_KEYS.join(", ")
-            )));
-        }
-        let trimmed = value.trim();
-
-        // Reject bad values before touching the file.
-        match key {
-            "timezone" => {
-                TimeZone::get(trimmed).map_err(|_| {
-                    config_err(format!("{trimmed:?} is not a known IANA timezone name"))
-                        .with_hint("example: tt config set timezone America/New_York")
-                })?;
-            }
-            "week_start" => {
-                parse_weekday(trimmed)?;
-            }
-            "duration_precision" => {
-                if trimmed != "minute" && trimmed != "second" {
-                    return Err(config_err(format!(
-                        "{trimmed:?} is not a supported duration precision"
+        match std::env::var_os("TT_CONFIG") {
+            Some(path) if !path.is_empty() => {
+                let path = PathBuf::from(path);
+                if !path.exists() {
+                    return Err(usage(format!(
+                        "config file {} does not exist",
+                        path.display()
                     ))
-                    .with_hint("use \"minute\" or \"second\""));
+                    .with_hint("TT_CONFIG points at this path; unset it to use the default"));
                 }
+                Config::from_path(&path)
             }
-            _ => {}
+            _ => match default_path() {
+                Some(path) if path.exists() => Config::from_path(&path),
+                _ => Config::from_raw(RawConfig::default()),
+            },
         }
+    }
 
-        let existing = match std::fs::read_to_string(path) {
-            Ok(text) => text,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(err) => {
-                return Err(config_err(format!("cannot read {}: {err}", path.display())));
+    pub fn from_path(path: &Path) -> Result<Config> {
+        let text = std::fs::read_to_string(path).map_err(|e| {
+            usage(format!("cannot read config file {}: {e}", path.display()))
+        })?;
+        let raw: RawConfig = toml::from_str(&text).map_err(|e| {
+            // `e.to_string()` quotes the offending source line, which would
+            // echo back a credential the user should not have put here.
+            let detail = crate::ot::redact::redact(e.message());
+            usage(format!("config file {} is not valid: {detail}", path.display())).with_hint(
+                "supported keys: ot_command, timezone, week_start, report_format, \
+                 timeout_seconds, max_entries, version_check. OpenTodo credentials and \
+                 server URL belong to `ot`, not to tt",
+            )
+        })?;
+        Config::from_raw(raw)
+    }
+
+    pub fn from_raw(raw: RawConfig) -> Result<Config> {
+        let (timezone, timezone_source) = match &raw.timezone {
+            Some(name) => {
+                let tz = TimeZone::get(name).map_err(|e| {
+                    usage(format!("unknown timezone {name:?}: {e}"))
+                        .with_hint("use an IANA name such as America/New_York")
+                })?;
+                (tz, TimezoneSource::Config)
             }
+            // OpenTodo's CLI exposes no timezone setting, so the system zone is
+            // the documented fallback (docs/opentodo-compatibility.md §9).
+            None => (TimeZone::system(), TimezoneSource::System),
         };
-        let mut table: toml::Table = existing.parse().map_err(|e| {
-            config_err(format!("{} is not valid TOML: {e}", path.display()))
+
+        let week_start = parse_weekday(&raw.week_start)?;
+        let report_format: Format = raw.report_format.parse().map_err(|e: String| {
+            usage(format!("invalid report_format: {e}"))
         })?;
 
-        let stored = match key {
-            "week_start" => weekday_name(parse_weekday(trimmed)?).to_string(),
-            _ => trimmed.to_string(),
-        };
-        table.insert(key.to_string(), toml::Value::String(stored));
-
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                config_err(format!("cannot create {}: {e}", parent.display()))
-            })?;
+        if raw.ot_command.trim().is_empty() {
+            return Err(usage("ot_command must not be empty")
+                .with_hint("set ot_command to `ot` or to the full path of the OpenTodo CLI"));
         }
-        let rendered = toml::to_string_pretty(&table)
-            .map_err(|e| config_err(format!("cannot serialize configuration: {e}")))?;
-        std::fs::write(path, rendered)
-            .map_err(|e| config_err(format!("cannot write {}: {e}", path.display())))?;
-        Ok(())
-    }
-}
-
-/// The system timezone, named wherever possible.
-///
-/// `TimeZone::system()` keeps the right rules but cannot always report an IANA
-/// name — in containers, `/etc/localtime` is often a symlink out of the usual
-/// zoneinfo tree. Since each entry records the zone it was created in, fall
-/// back to `$TZ` and `/etc/timezone` to recover a real name, and warn if even
-/// those fail so the user knows to set `timezone` explicitly.
-fn system_timezone() -> (TimeZone, Option<String>) {
-    let system = TimeZone::system();
-    if system.iana_name().is_some() {
-        return (system, None);
-    }
-
-    let from_env = std::env::var("TZ").ok();
-    let from_file = std::fs::read_to_string("/etc/timezone").ok();
-    for candidate in [from_env, from_file].into_iter().flatten() {
-        // `$TZ` may carry a leading colon, and may hold a POSIX rule string
-        // rather than a zone name; `TimeZone::get` rejects anything unusable.
-        let name = candidate.trim().trim_start_matches(':').trim();
-        if name.is_empty() {
-            continue;
+        if raw.timeout_seconds == 0 {
+            return Err(usage("timeout_seconds must be greater than zero"));
         }
-        if let Ok(named) = TimeZone::get(name) {
-            return (named, None);
+        if raw.max_entries == 0 {
+            return Err(usage("max_entries must be greater than zero"));
         }
-    }
 
-    (
-        system,
-        Some(
-            "could not determine the name of the system timezone; times are still \
-             correct, but entries will not record an IANA zone name. Set it with \
-             `tt config set timezone <IANA name>`"
-                .to_string(),
-        ),
-    )
+        Ok(Config {
+            ot_command: raw.ot_command,
+            timezone,
+            timezone_source,
+            week_start,
+            report_format,
+            timeout_seconds: raw.timeout_seconds,
+            max_entries: raw.max_entries,
+            version_check: raw.version_check,
+        })
+    }
 }
 
-fn setting_error(path: &Path, key: &str, value: &str, problem: &str) -> AppError {
-    AppError::new(
-        ErrorKind::Config,
-        format!("setting {key} = {value:?} in {} is {problem}", path.display()),
-    )
+fn default_path() -> Option<PathBuf> {
+    directories::ProjectDirs::from("", "", "tt")
+        .map(|dirs| dirs.config_dir().join("config.toml"))
 }
 
-/// Configuration file location. `TT_CONFIG` overrides the OS-standard path.
-pub fn config_path() -> Result<PathBuf> {
-    if let Ok(raw) = std::env::var("TT_CONFIG")
-        && !raw.trim().is_empty()
-    {
-        return Ok(PathBuf::from(raw));
+pub fn parse_weekday(name: &str) -> Result<Weekday> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "monday" | "mon" => Ok(Weekday::Monday),
+        "tuesday" | "tue" => Ok(Weekday::Tuesday),
+        "wednesday" | "wed" => Ok(Weekday::Wednesday),
+        "thursday" | "thu" => Ok(Weekday::Thursday),
+        "friday" | "fri" => Ok(Weekday::Friday),
+        "saturday" | "sat" => Ok(Weekday::Saturday),
+        "sunday" | "sun" => Ok(Weekday::Sunday),
+        other => Err(usage(format!("unknown week_start {other:?}"))
+            .with_hint("use a weekday name, for example monday or sunday")),
     }
-    let dirs = directories::ProjectDirs::from("", "", "tt").ok_or_else(|| {
-        config_err("cannot determine a configuration directory for this platform")
-            .with_hint("set TT_CONFIG to an explicit config.toml path")
-    })?;
-    Ok(dirs.config_dir().join("config.toml"))
 }
 
-/// Database location, in precedence order: `--db`, then `TT_DB`, then the
-/// OS-standard data directory.
-pub fn database_path(flag: Option<&Path>) -> Result<PathBuf> {
-    if let Some(path) = flag {
-        return Ok(path.to_path_buf());
+pub fn weekday_name(day: Weekday) -> &'static str {
+    match day {
+        Weekday::Monday => "monday",
+        Weekday::Tuesday => "tuesday",
+        Weekday::Wednesday => "wednesday",
+        Weekday::Thursday => "thursday",
+        Weekday::Friday => "friday",
+        Weekday::Saturday => "saturday",
+        Weekday::Sunday => "sunday",
     }
-    if let Ok(raw) = std::env::var("TT_DB")
-        && !raw.trim().is_empty()
-    {
-        return Ok(PathBuf::from(raw));
-    }
-    let dirs = directories::ProjectDirs::from("", "", "tt").ok_or_else(|| {
-        config_err("cannot determine a data directory for this platform")
-            .with_hint("pass --db PATH or set TT_DB")
-    })?;
-    Ok(dirs.data_dir().join("tt.db"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn write(dir: &Path, body: &str) -> PathBuf {
-        let path = dir.join("config.toml");
-        std::fs::write(&path, body).unwrap();
-        path
+    #[test]
+    fn defaults_are_usable() {
+        let config = Config::from_raw(RawConfig::default()).expect("defaults are valid");
+        assert_eq!(config.ot_command, "ot");
+        assert_eq!(config.week_start, Weekday::Monday);
+        assert_eq!(config.report_format, Format::Text);
+        assert_eq!(config.timezone_source, TimezoneSource::System);
     }
 
     #[test]
-    fn missing_file_yields_defaults() {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = Config::load_from(&dir.path().join("absent.toml")).unwrap();
-        assert_eq!(cfg.week_start, Weekday::Monday);
-        assert_eq!(cfg.precision, Precision::Minute);
-        assert!(cfg.default_project.is_none());
-        assert!(cfg.warnings.is_empty());
+    fn unknown_keys_are_rejected_so_secrets_cannot_be_stashed_here() {
+        let err = toml::from_str::<RawConfig>("token = \"super-secret\"\n")
+            .expect_err("unknown keys must not deserialize");
+        assert!(err.to_string().contains("token"), "{err}");
     }
 
     #[test]
-    fn reads_every_setting() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write(
-            dir.path(),
-            "timezone = \"America/New_York\"\nweek_start = \"sunday\"\n\
-             duration_precision = \"second\"\ndefault_project = \"alpha\"\n",
-        );
-        let cfg = Config::load_from(&path).unwrap();
-        assert_eq!(cfg.timezone_name(), "America/New_York");
-        assert_eq!(cfg.week_start, Weekday::Sunday);
-        assert_eq!(cfg.precision, Precision::Second);
-        assert_eq!(cfg.default_project.as_deref(), Some("alpha"));
+    fn bad_timezone_is_actionable() {
+        let raw = RawConfig { timezone: Some("Mars/Olympus".into()), ..Default::default() };
+        let err = Config::from_raw(raw).expect_err("unknown zone");
+        assert_eq!(err.kind, crate::error::Kind::Usage);
+        assert!(err.hint().unwrap().contains("IANA"));
     }
 
     #[test]
-    fn invalid_values_name_the_setting_and_the_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write(dir.path(), "timezone = \"Mars/Olympus\"\n");
-        let err = Config::load_from(&path).unwrap_err();
-        assert_eq!(err.kind, ErrorKind::Config);
-        assert!(err.message.contains("timezone"), "{}", err.message);
-        assert!(err.message.contains("config.toml"), "{}", err.message);
-
-        let path = write(dir.path(), "week_start = \"funday\"\n");
-        assert!(Config::load_from(&path).unwrap_err().message.contains("week_start"));
-
-        let path = write(dir.path(), "duration_precision = \"nanosecond\"\n");
-        assert!(
-            Config::load_from(&path).unwrap_err().message.contains("duration_precision")
-        );
-    }
-
-    #[test]
-    fn unknown_keys_warn_but_do_not_fail() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write(dir.path(), "week_start = \"monday\"\nnonsense = 1\n");
-        let cfg = Config::load_from(&path).unwrap();
-        assert_eq!(cfg.warnings.len(), 1);
-        assert!(cfg.warnings[0].contains("nonsense"));
-    }
-
-    #[test]
-    fn set_validates_before_writing_and_preserves_other_keys() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write(dir.path(), "default_project = \"alpha\"\nnonsense = \"keep\"\n");
-
-        assert!(Config::set(&path, "timezone", "Mars/Olympus").is_err());
-        assert!(Config::set(&path, "bogus", "x").is_err());
-        // A rejected value must not have modified the file.
-        assert!(std::fs::read_to_string(&path).unwrap().contains("alpha"));
-
-        Config::set(&path, "timezone", "America/New_York").unwrap();
-        Config::set(&path, "week_start", "SUNDAY").unwrap();
-        let cfg = Config::load_from(&path).unwrap();
-        assert_eq!(cfg.timezone_name(), "America/New_York");
-        assert_eq!(cfg.week_start, Weekday::Sunday);
-        assert_eq!(cfg.default_project.as_deref(), Some("alpha"));
-        assert!(std::fs::read_to_string(&path).unwrap().contains("keep"));
-    }
-
-    #[test]
-    fn set_creates_the_file_and_parent_directory() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("nested").join("config.toml");
-        Config::set(&path, "week_start", "friday").unwrap();
-        assert_eq!(Config::load_from(&path).unwrap().week_start, Weekday::Friday);
-    }
-
-    #[test]
-    fn the_system_timezone_is_named_whenever_possible() {
-        let (tz, warning) = system_timezone();
-        match tz.iana_name() {
-            // Either we resolved a real name, or we said so plainly.
-            Some(name) => {
-                assert!(!name.is_empty());
-                assert!(warning.is_none(), "a named zone needs no warning");
-                assert!(TimeZone::get(name).is_ok(), "the name must round-trip");
-            }
-            None => {
-                let warning = warning.expect("an unnamed zone must warn");
-                assert!(warning.contains("tt config set timezone"), "{warning}");
-            }
-        }
-    }
-
-    #[test]
-    fn database_path_precedence_prefers_the_flag() {
-        let flag = PathBuf::from("/tmp/explicit.db");
-        assert_eq!(database_path(Some(&flag)).unwrap(), flag);
+    fn week_start_accepts_names_and_abbreviations() {
+        assert_eq!(parse_weekday("Sunday").unwrap(), Weekday::Sunday);
+        assert_eq!(parse_weekday(" sun ").unwrap(), Weekday::Sunday);
+        assert!(parse_weekday("funday").is_err());
     }
 }
