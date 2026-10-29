@@ -28,9 +28,21 @@ Built against `SPEC.md`. What `ot` is documented to do, and what that means for
 - The OpenTodo CLI, version 0.9.0 or later, signed in:
 
   ```bash
-  go install github.com/pixari/opentodo/cmd/ot@latest
+  go install github.com/OpenTodoApp/opentodo/cmd/ot@latest
   ot login https://todo.example.com
   ```
+
+  A plain `go install` leaves `ot`'s version string at `dev`, which `tt`
+  cannot read as a version number — it still works, but warns on every
+  command. Stamp it to silence that:
+
+  ```bash
+  go install -ldflags="-X main.version=v0.16.0" \
+    github.com/OpenTodoApp/opentodo/cmd/ot@v0.16.0
+  ```
+
+  Or use the prebuilt container in [`containers/`](containers/), which does
+  that for you.
 
 `tt` stores no credentials and no server URL. Authentication, profiles and
 instance selection stay with `ot` (`ot auth status`, `OPENTODO_URL`,
@@ -203,6 +215,39 @@ export OPENTODO_PROFILE=tt-test
 
 Those tests carry `#[ignore]`, so `cargo test` never touches a server, and CI
 asserts they stayed that way. See [`testing/README.md`](testing/README.md).
+
+### Deploying the server
+
+[`deploy/`](deploy/) holds two ways to run OpenTodo itself — behind HTTPS,
+with a Keycloak realm that brokers GitHub accounts into OpenTodo's OIDC
+sign-in. They share one realm definition, so the two cannot drift.
+
+| | |
+|---|---|
+| [`deploy/k8s/`](deploy/k8s/) | Kubernetes, as kustomize overlays: a production cluster, and a `kind` cluster you can throw away. `cd deploy/k8s/kind && ./bootstrap.sh` |
+| [`deploy/quadlet/`](deploy/quadlet/) | A single host, as podman quadlets, set up with Ansible and driven by a justfile. `cd deploy/quadlet && just deploy` |
+
+Either way, [`deploy/bin/ot-credentials.sh`](deploy/bin/ot-credentials.sh)
+points your local `ot` at the result with an API token — which is the only
+credential `tt` needs, and the only one that works on an account created
+through single sign-on.
+
+### Containers
+
+[`containers/`](containers/) builds two images from one Containerfile: a
+Toolbox/Distrobox with `tt` and `ot` already on `PATH`, and a test image that
+runs `cargo test` and the opt-in live tests against a mounted working tree.
+
+```bash
+cd containers && ./build.sh
+toolbox create --image localhost/tt-toolbox:latest tt
+./run-tests.sh unit
+```
+
+It is infrastructure for the server, not for `tt`. The one thing it changes
+for `tt` users: an account created through SSO has no password, so give `ot`
+an API token (`ot auth set-token`, or `OPENTODO_TOKEN`) rather than
+`ot login`. See [`deploy/k8s/README.md`](deploy/k8s/README.md).
 
 ### Continuous integration
 

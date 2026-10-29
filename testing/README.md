@@ -34,7 +34,7 @@ directory is how you close the **UNVERIFIED** items in
 ## Requirements
 
 - Docker with Compose
-- The OpenTodo CLI 0.9+ (`go install github.com/pixari/opentodo/cmd/ot@latest`)
+- The OpenTodo CLI 0.9+ (`go install github.com/OpenTodoApp/opentodo/cmd/ot@latest`)
 - `jq`, and GNU `date` (on macOS: `brew install coreutils` and put `gnubin`
   on `PATH`)
 

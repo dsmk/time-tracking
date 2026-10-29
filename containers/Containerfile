@@ -1,0 +1,108 @@
+# Two images from one file, sharing the same build of tt and ot.
+#
+#   --target toolbox   an interactive Toolbox/Distrobox for running tt and ot
+#   --target test      a non-interactive image for scripted integration tests
+#
+# Build from the repository root, because the Rust build needs the source:
+#
+#   podman build -f containers/Containerfile --target toolbox -t tt-toolbox .
+#
+# ./build.sh does that for you.
+
+ARG FEDORA_VERSION=44
+ARG GO_VERSION=1.26
+ARG RUST_VERSION=1.88
+
+# ---------------------------------------------------------------------------
+# ot — the OpenTodo CLI that tt drives
+# ---------------------------------------------------------------------------
+#
+# NOTE the module path. Upstream's documented command is
+# `go install github.com/pixari/opentodo/cmd/ot@latest`, and that is what the
+# rest of this repository still says, but the project's go.mod now declares
+# `github.com/OpenTodoApp/opentodo`. Go refuses a module whose declared path
+# differs from the one it was asked for, so the documented command fails and
+# this one is used instead.
+FROM docker.io/library/golang:${GO_VERSION} AS ot
+ARG OT_VERSION=v0.16.0
+ENV CGO_ENABLED=0
+
+# The version has to be stamped in, not just installed. cmd/ot/main.go
+# declares `var version = "dev"` and upstream's Makefile overrides it with
+# `-X main.version=`; a plain `go install` leaves it at "dev", `ot version
+# --json` then reports {"version":"dev"}, and tt cannot parse that as a
+# semver — so it prints "could not determine the OpenTodo client version"
+# on every single command. Harmless, but it would make the image feel broken.
+RUN go install -trimpath -ldflags="-s -w -X main.version=${OT_VERSION}" \
+      "github.com/OpenTodoApp/opentodo/cmd/ot@${OT_VERSION}" \
+    && /go/bin/ot version --json
+
+# ---------------------------------------------------------------------------
+# tt — this repository
+# ---------------------------------------------------------------------------
+FROM docker.io/library/rust:${RUST_VERSION} AS tt
+WORKDIR /src
+# Cargo.lock is committed, so --locked gives the same dependency versions CI
+# builds with.
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+COPY tests ./tests
+RUN cargo build --release --locked \
+    && strip target/release/tt
+
+# ---------------------------------------------------------------------------
+# toolbox — interactive
+# ---------------------------------------------------------------------------
+#
+# Based on fedora-toolbox, which already carries everything toolbox(1) needs
+# from an image. The label is what makes `toolbox create --image` accept it.
+#
+# Toolbox and Distrobox both share the host's network and bind-mount your
+# home directory, which matters here: credentials set up on the host with
+# deploy/bin/ot-credentials.sh (in ~/.config/opentodo) work unchanged inside,
+# and a server on the host's localhost is reachable.
+FROM registry.fedoraproject.org/fedora-toolbox:${FEDORA_VERSION} AS toolbox
+
+LABEL com.github.containers.toolbox="true" \
+      org.opencontainers.image.title="tt toolbox" \
+      org.opencontainers.image.description="tt and the OpenTodo CLI, for interactive use" \
+      org.opencontainers.image.source="https://github.com/dsmk/time-tracking"
+
+# jq and GNU date are what testing/*.sh need; the rest of what those scripts
+# use is already in the base image.
+#
+# rust and cargo are here so the toolbox can rebuild tt, which is most of the
+# point of having one. Build with --build-arg TOOLBOX_EXTRA_PACKAGES="" to
+# leave them out and save about 500 MB. Note that Fedora's rustc is whatever
+# that release ships (1.99 on f44), not the 1.88 pinned above.
+ARG TOOLBOX_EXTRA_PACKAGES="rust cargo"
+RUN dnf -y install jq ${TOOLBOX_EXTRA_PACKAGES} \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+COPY --from=ot /go/bin/ot /usr/local/bin/ot
+COPY --from=tt /src/target/release/tt /usr/local/bin/tt
+
+# ---------------------------------------------------------------------------
+# test — scripted integration tests
+# ---------------------------------------------------------------------------
+#
+# The repository is mounted at /work rather than copied in, so a run tests the
+# working tree. CARGO_TARGET_DIR points outside it so a container build never
+# fights the host's ./target.
+FROM docker.io/library/rust:${RUST_VERSION} AS test
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends jq ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=ot /go/bin/ot /usr/local/bin/ot
+
+ENV CARGO_TARGET_DIR=/cargo-target \
+    CARGO_HOME=/cargo-home
+RUN mkdir -p /cargo-target /cargo-home && chmod 0777 /cargo-target /cargo-home
+
+WORKDIR /work
+COPY containers/test-entrypoint.sh /usr/local/bin/test-entrypoint
+ENTRYPOINT ["/usr/local/bin/test-entrypoint"]
+CMD ["all"]

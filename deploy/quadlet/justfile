@@ -108,6 +108,19 @@ ca:
     ansible opentodo -b -m fetch -a "src=/etc/opentodo/caddy-data/caddy/pki/authorities/local/root.crt dest=./caddy-root.crt flat=yes"
     @echo "wrote caddy-root.crt - import it into your browser, or trust it system-wide"
 
+# Point your local `ot` at this deployment with an API token.
+# Runs on your machine, not the deployed host. `just ot-credentials work`
+# uses the profile name "work".
+ot-credentials profile="opentodo":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    host=$(sed -n 's/^opentodo_todo_host: *//p' group_vars/all.yml | tr -d '"' | tail -1)
+    if [ -z "$host" ]; then
+        echo "opentodo_todo_host is not set in group_vars/all.yml" >&2
+        exit 1
+    fi
+    exec ../bin/ot-credentials.sh --url "https://$host" --profile "{{ profile }}"
+
 # Print the command for a Keycloak admin shell. It needs a tty, so it has to
 # be run on the host rather than through Ansible.
 kcadm:

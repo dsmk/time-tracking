@@ -301,24 +301,56 @@ in. Two documented ways back:
   The manifests leave this variable unset precisely so it stays available as
   the switch.
 
-## How `tt` signs in
+## Giving `ot` a key
 
-None of this changes how `tt` reaches OpenTodo. `tt` runs `ot`, and `ot`
-authenticates with an API token — upstream states API tokens and the CLI keep
-working even with SSO-only sign-in.
+`tt` stores no credentials and no server URL. It runs `ot`, and uses whatever
+`ot` is configured with — so this is the one setup step a `tt` user needs
+after the server is up.
 
-What does change: an account created through SSO has **no password**, so
-`ot login <url>` with an email and password is not available to it. Create a
-token in the web interface and hand it to `ot`:
+Use a **token**, not `ot login`: an account created through SSO has no
+password, so there is nothing for `ot login` to ask for. Tokens keep working
+under SSO-only sign-in, which upstream states explicitly.
+
+**1. Get a token.** Either from the web interface — sign in through GitHub,
+then *Settings → Account → API tokens* — or, on an account that still has a
+password (typically the owner on a fresh instance):
 
 ```bash
-ot auth set-token --profile prod https://todo.example.com
-# or
-export OPENTODO_URL=https://todo.example.com OPENTODO_TOKEN=...
+ot login https://todo.example.com
+ot token create tt --scope read
 ```
 
-`tt` stores neither, as [the README](../../README.md) says; it reads whatever
-`ot` is configured with.
+`--scope read` covers `tt status`, `tt log` and `tt report`. `tt start` and
+`tt stop` are writes and need a token without that restriction.
+
+**2. Hand it to `ot`.** [`../bin/ot-credentials.sh`](../bin/ot-credentials.sh)
+does this on a named profile, keeping the test instance away from any real
+account you use day to day:
+
+```bash
+deploy/bin/ot-credentials.sh --url https://todo.example.com --profile prod
+export OPENTODO_PROFILE=prod
+tt status
+```
+
+It reads the token from a hidden prompt, `--token-file`, or `$OPENTODO_TOKEN`
+— never from a command-line argument, where `ps` would show it to every user
+on the machine. It refuses a plain-http URL that is not loopback.
+
+For the `kind` overlay the URL is `https://todo.kind.test`, and `ot` has to
+trust the cluster CA that `bootstrap.sh` wrote to `kind/kind-ca.crt`:
+
+```bash
+SSL_CERT_FILE=$PWD/kind/kind-ca.crt \
+  deploy/bin/ot-credentials.sh --url https://todo.kind.test --profile kind
+```
+
+Or import that CA into the host trust store once
+(`sudo trust anchor kind/kind-ca.crt` on Fedora) and skip the variable.
+
+There is also a container with `tt` and `ot` already in it, which picks up the
+credentials you just set up because it shares your home directory — see
+[`containers/README.md`](../../containers/README.md).
 
 ## Operational notes
 

@@ -20,9 +20,12 @@ Every claim below is tagged:
 | **DOC** | Stated in the OpenTodo documentation listed above. |
 | **MOCK** | Exercised by `tt`'s automated tests against a mock `ot` executable. The *contract* is DOC; the mock only proves `tt` handles it. |
 | **UNVERIFIED** | Not stated in the documentation and not tested. `tt` must not depend on it, or must degrade safely. |
+| **BINARY** | Observed by running a real `ot` binary, built from upstream source. Not a live *server* — no OpenTodo instance was involved — so it settles only what the client does offline. |
 
-**No live OpenTodo server or real `ot` binary was available during this
-investigation.** Nothing below is tagged "tested against a live instance".
+**No live OpenTodo server was available during this investigation.** Nothing
+below is tagged "tested against a live instance". A real `ot` binary has since
+become available — [`containers/`](../containers/) builds one — and the few
+facts taken from it are tagged **BINARY**.
 Section 11 lists exactly what must still be checked before the acceptance
 criteria in `SPEC.md` §12 can be called met.
 
@@ -37,12 +40,26 @@ criteria in `SPEC.md` §12 can be called met.
 
 `tt` runs `ot version --json` once per invocation before any other call. It
 fails with an actionable error when `output_version` is present and is not `1`,
-or when the reported client version parses and is below 0.9.0. The exact key
-holding the client version string is **UNVERIFIED** (the docs only name
-`output_version`), so the adapter searches a small set of candidate keys
-(`version`, `ot_version`, `client_version`, `cli_version`) and *skips* the
-version comparison rather than failing when none is present. The probe can be
-turned off with `version_check = false`.
+or when the reported client version parses and is below 0.9.0. The adapter
+searches a small set of candidate keys (`version`, `ot_version`,
+`client_version`, `cli_version`) and *skips* the version comparison rather
+than failing when none is present. The probe can be turned off with
+`version_check = false`.
+
+**The key is `version`** — BINARY, 2026-10-29. An `ot` built from upstream
+source at `v0.16.0` (the `ot` stage of [`containers/Containerfile`](../containers/Containerfile))
+prints:
+
+```json
+{"output_version":1,"version":"v0.16.0"}
+```
+
+so `output_version` is 1 as documented, and the leading `v` is stripped by
+`parse_semver`. Note that a plain `go install` leaves `main.version` at its
+`"dev"` default — upstream's Makefile stamps it with
+`-ldflags "-X main.version=…"`. An unstamped `ot` makes `tt` warn that it
+could not determine the client version, on every command. That is a build
+artefact, not a protocol difference.
 
 ## 2. Time-tracking commands (DOC)
 
@@ -279,7 +296,9 @@ file with the results:
 1. The real shape of `ot time list --json` — bare array vs `{entries,…}`
    envelope, and whether `serverTime` is present.
 2. The real shape of `ot time start --json` and `ot time stop --json`.
-3. Which key in `ot version --json` holds the client version.
+3. ~~Which key in `ot version --json` holds the client version.~~ **Answered**
+   (see §1): it is `version`. `containers/` builds an `ot` that can be asked
+   without a server.
 4. The default and maximum values of `ot time list --limit`, and what happens
    when more entries exist than the limit.
 5. Which timezone `ot` uses to interpret `--from`/`--to` (confirming that the
@@ -291,7 +310,14 @@ file with the results:
 8. The shape of `ot list --json` task entities used by the picker.
 
 Run `ot schema > schema.json` on a real install first: per the docs it answers
-items 1–4 and 8 offline, without touching a server.
+items 1–4 and 8 offline, without touching a server. Since
+[`containers/`](../containers/) now builds a real `ot`, that no longer needs
+an install at all:
+
+```bash
+cd containers && ./build.sh test
+podman run --rm --network=none tt-test:latest shell ot schema > schema.json
+```
 `testing/capture-findings.sh` does that and the rest in one go, and the manual
 `Live OpenTodo checks` workflow captures the schema as a CI artifact.
 

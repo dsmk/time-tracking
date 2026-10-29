@@ -252,6 +252,17 @@ Signing in:
    Keycloak admin console   https://$KEYCLOAK_HOST/admin/
                             admin / $admin_password
 
+To drive this instance with tt, create an API token in the web
+interface (Settings -> Account -> API tokens) and give it to ot.
+The cluster CA has to be trusted for that call too:
+
+   SSL_CERT_FILE=$here/kind-ca.crt \\
+     $here/../../bin/ot-credentials.sh \\
+       --url https://$TODO_HOST --profile kind
+
+   export OPENTODO_PROFILE=kind
+   tt status
+
 Tear it all down with ./teardown.sh
 ================================================================
 EOF

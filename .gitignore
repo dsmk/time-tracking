@@ -1,1 +1,19 @@
 /target
+
+# Written by testing/seed.sh; holds ids from a throwaway instance.
+testing/.live-env
+testing/.env
+# Captured ot output; may name an account or token.
+testing/findings/
+
+# Client secrets and generated passwords for the Kubernetes overlays.
+deploy/k8s/overlays/*/secrets.env
+# Written by deploy/k8s/kind/bootstrap.sh.
+deploy/k8s/kind/kind-ca.crt
+
+# Podman/Ansible deployment: secrets and machine-local files.
+deploy/quadlet/vault.yml
+deploy/quadlet/inventory.yml
+deploy/quadlet/.vault-pass
+# Fetched by `just ca`.
+deploy/quadlet/caddy-root.crt

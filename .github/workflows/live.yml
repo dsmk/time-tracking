@@ -71,7 +71,7 @@ jobs:
           go-version: stable
 
       - name: Install the OpenTodo CLI
-        run: go install github.com/pixari/opentodo/cmd/ot@latest
+        run: go install github.com/OpenTodoApp/opentodo/cmd/ot@latest
 
       - name: Capture
         run: |
@@ -117,7 +117,7 @@ jobs:
 
       - name: Install the OpenTodo CLI
         if: steps.check.outputs.ready == 'true'
-        run: go install github.com/pixari/opentodo/cmd/ot@latest
+        run: go install github.com/OpenTodoApp/opentodo/cmd/ot@latest
 
       - name: Seed and run
         if: steps.check.outputs.ready == 'true'

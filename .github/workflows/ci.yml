@@ -48,9 +48,27 @@ jobs:
 
       - name: Shell scripts parse
         run: |
-          for script in testing/*.sh; do
+          for script in testing/*.sh deploy/k8s/kind/*.sh deploy/bin/*.sh \
+                        deploy/k8s/base/keycloak/render-realm.sh \
+                        containers/*.sh; do
             bash -n "$script" || exit 1
           done
+
+      # The deployment manifests are not applied anywhere in CI; these only
+      # check that they still build and parse.
+      - name: Kubernetes overlays build
+        run: |
+          for overlay in deploy/k8s/overlays/*/; do
+            cp "$overlay/secrets.env.example" "$overlay/secrets.env"
+            kubectl kustomize "$overlay" > /dev/null || exit 1
+            rm -f "$overlay/secrets.env"
+          done
+
+      - name: Ansible playbook parses
+        run: |
+          pipx install --quiet ansible-core
+          cd deploy/quadlet
+          ansible-playbook site.yml --syntax-check -e vault_file=vault.example.yml
 
   msrv:
     name: Minimum supported Rust (1.88)

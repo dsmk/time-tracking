@@ -213,13 +213,47 @@ just destroy           # remove everything, including the data. Asks first.
   `OPENTODO_OIDC_SSO_ONLY=false` on the container is the documented override.
   The role leaves that variable unset so it stays available as the switch.
 
-## How `tt` signs in
+## Giving `ot` a key
 
-Unchanged by any of this. `tt` runs `ot`, and `ot` authenticates with an API
-token, which keeps working under SSO-only. The one thing to know: an account
-created through SSO has **no password**, so `ot login` with an email and
-password is not available to it — create a token in the web interface and use
-`ot auth set-token` or `OPENTODO_TOKEN`.
+`tt` stores no credentials and no server URL — it runs `ot` and uses whatever
+`ot` is configured with. So after the stack is up, one step remains, and it
+happens on *your* machine, not the deployed host.
+
+Use a **token**, not `ot login`: an account created through SSO has no
+password. Get one from the web interface (*Settings → Account → API tokens*),
+or from an account that still has a password:
+
+```bash
+ot login https://todo.example.com
+ot token create tt --scope read     # read covers status, log and report
+```
+
+Then:
+
+```bash
+just ot-credentials                 # uses the host from group_vars/all.yml
+export OPENTODO_PROFILE=opentodo
+tt status
+```
+
+`just ot-credentials PROFILE` picks a different profile name. It wraps
+[`../bin/ot-credentials.sh`](../bin/ot-credentials.sh), which reads the token
+from a hidden prompt, `--token-file` or `$OPENTODO_TOKEN` — never from argv,
+where `ps` would expose it — and refuses plain http that is not loopback.
+
+In TLS mode `internal` the certificate comes from Caddy's own CA, so `ot` has
+to trust it too:
+
+```bash
+just ca                             # fetches ./caddy-root.crt
+SSL_CERT_FILE=$PWD/caddy-root.crt just ot-credentials
+```
+
+or `sudo trust anchor caddy-root.crt` once and forget about it.
+
+[`containers/`](../../containers/) has a Toolbox image with `tt` and `ot`
+already installed; it shares your home directory, so the credentials you just
+set up work inside it unchanged.
 
 ## What has been checked
 

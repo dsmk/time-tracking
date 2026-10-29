@@ -97,7 +97,7 @@ impl<R: Runner> OtCli<R> {
                 format!("the OpenTodo client {:?} was not found", self.program),
             )
             .with_hint(
-                "install it with `go install github.com/pixari/opentodo/cmd/ot@latest`, or set \
+                "install it with `go install github.com/OpenTodoApp/opentodo/cmd/ot@latest`, or set \
                  `ot_command` in the tt config file to its full path",
             ),
             RunError::NotExecutable(detail) => Error::new(
